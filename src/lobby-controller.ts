@@ -232,7 +232,10 @@ export class LobbyController {
     if (this.matchId) return;
     this.clearTurnTimer();
     this.matchId = (await this.db.match.create({ data: { lobbyId: this.lobbyId, beatmapId: mapId, teamEvent: this.teamEvent, startedAt: new Date() } })).id;
-    this.activeBeatmapId = mapId; this.startedAt = new Date(); this.votes.clear(); this.reapplyTitle(); this.reapplyPassword(); this.reapplyFreeMod();
+    // Reapplying Free Mod with `!mp mods 0 freemod` clears every player's
+    // individual selections. It is already enforced when the setting changes,
+    // so never send that command as a match is beginning.
+    this.activeBeatmapId = mapId; this.startedAt = new Date(); this.votes.clear(); this.reapplyTitle(); this.reapplyPassword();
   }
   private stopTimer() { if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
   private async finish(scores: Array<{ player: Participant; score: number; team?: "red" | "blue" }>) { if (!this.matchId) return; const ordered = [...scores].sort((a, b) => b.score - a.score); const ratedMatch = ordered.length > 1; const avg = (await this.db.player.findMany({ where: { id: { in: ordered.map(x => x.player.id) } } })).reduce((s, p, _, a) => s + p.elo / a.length, 0); for (const [i, s] of ordered.entries()) { const winner = this.teamEvent ? s.team === ordered[0].team : i === 0; const player = await this.db.player.findUniqueOrThrow({ where: { id: s.player.id } }); await this.db.$transaction([this.db.score.create({ data: { matchId: this.matchId, playerId: s.player.id, score: s.score, placement: i + 1, team: s.team, winner } }), this.db.player.update({ where: { id: s.player.id }, data: { ...(ratedMatch ? { elo: newRating(player.elo, avg, winner ? 1 : 0) } : {}), matches: { increment: 1 }, wins: { increment: winner ? 1 : 0 }, streak: winner ? { increment: 1 } : 0, longestStreak: winner ? Math.max(player.longestStreak, player.streak + 1) : player.longestStreak } })]); }
