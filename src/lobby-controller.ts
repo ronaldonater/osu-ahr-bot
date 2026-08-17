@@ -104,6 +104,7 @@ export class LobbyController {
     await this.syncPlayers(); const [cmd, ...args] = raw.trim().split(/\s+/); const value = args.join(" ");
     if (cmd.startsWith("*") && !admins.has(p.id)) return void this.room.say(`${p.username}: administrator permission required.`);
     if (cmd === "!queue") return void this.showQueue();
+    if (cmd === "!cmds") return void this.room.say("Command list: https://ronaldonater.com/osu-ahr");
     if (["!regulations"].includes(cmd)) return void this.showRegulations();
     if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.0");
     if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p);
