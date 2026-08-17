@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>osu! AHR Dashboard</title><link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <header><p class="eyebrow">LOCAL CONTROL PANEL</p><h1>osu! AHR Dashboard</h1><p>Create and manage referee lobbies without using in-game setup commands.</p></header>
+    <section class="token"><label>Dashboard token <input id="token" type="password" placeholder="DASHBOARD_TOKEN" autocomplete="off"></label><button id="save-token" class="secondary">Save token</button><button id="refresh" class="secondary">Refresh lobbies</button></section>
+    <section class="card"><h2>Create lobby</h2><form id="create-form">
+      <div class="grid"><label>Lobby title<input name="title" required maxlength="80" placeholder="AHR Lobby #1"></label><label>Initial password <input name="password" maxlength="64" placeholder="Leave blank for none"></label></div>
+      <h3>Map regulations</h3>
+      <div class="grid checks"><label><input name="regulationsEnabled" type="checkbox" checked> Enable checker</label><label><input name="freeMod" type="checkbox" checked> Free Mod</label><label><input name="allowConvert" type="checkbox"> Allow conversions</label><label>Mode <select name="gameMode"><option value="">Any mode</option><option value="osu">osu!</option><option value="taiko">taiko</option><option value="fruits">catch</option><option value="mania">mania</option></select></label></div>
+      <div class="grid four"><label>Min stars<input name="minStar" type="number" min="0" step="0.01" placeholder="Any"></label><label>Max stars<input name="maxStar" type="number" min="0" step="0.01" placeholder="Any"></label><label>Min length (sec)<input name="minLength" type="number" min="0" placeholder="Any"></label><label>Max length (sec)<input name="maxLength" type="number" min="0" placeholder="Any"></label></div>
+      <label>Allowed statuses <input name="statuses" placeholder="All statuses (or: ranked, loved, qualified)"></label>
+      <label>Random event chance <input name="eventChance" type="number" min="0" max="100" value="8"> <span class="hint">percent per match</span></label>
+      <button type="submit">Create lobby</button><p id="notice" role="status"></p>
+    </form></section>
+    <section class="card"><div class="section-heading"><h2>Lobbies</h2><span id="count"></span></div><div id="lobbies" class="lobbies"><p class="muted">Save your token, then refresh.</p></div></section>
+  </main><script src="/app.js"></script>
+</body>
+</html>

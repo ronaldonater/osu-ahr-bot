@@ -1,0 +1,69 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Player {
+  id          Int       @id
+  username    String
+  elo         Int       @default(1000)
+  matches     Int       @default(0)
+  wins        Int       @default(0)
+  streak      Int       @default(0)
+  longestStreak Int     @default(0)
+  playSeconds Int       @default(0)
+  denied      Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  scores      Score[]
+  lobbyPlayers LobbyPlayer[]
+}
+
+model Lobby {
+  id          Int       @id @default(autoincrement())
+  banchoId    Int       @unique
+  name        String
+  password    String?
+  config      Json
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  matches     Match[]
+  players     LobbyPlayer[]
+}
+
+model LobbyPlayer {
+  lobbyId      Int
+  playerId     Int
+  joinedAt     DateTime @default(now())
+  sessionStart DateTime @default(now())
+  lobby        Lobby    @relation(fields: [lobbyId], references: [id], onDelete: Cascade)
+  player       Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  @@id([lobbyId, playerId])
+}
+
+model Match {
+  id          Int       @id @default(autoincrement())
+  lobbyId     Int
+  beatmapId   Int?
+  teamEvent   Boolean   @default(false)
+  startedAt   DateTime?
+  endedAt     DateTime?
+  lobby       Lobby     @relation(fields: [lobbyId], references: [id], onDelete: Cascade)
+  scores      Score[]
+}
+
+model Score {
+  matchId     Int
+  playerId    Int
+  score       Int
+  placement   Int
+  team        String?
+  winner      Boolean
+  match       Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  player      Player   @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  @@id([matchId, playerId])
+}
