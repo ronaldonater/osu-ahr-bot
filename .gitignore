@@ -3,3 +3,15 @@ dist/
 .env
 prisma/*.db
 prisma/*.db-journal
+output/pdf/.gitkeep
+output/pdf/Damian_Metovic_Resume_AHR.pdf
+output/pdf/Damian_Metovic_Resume_Updated.pdf
+tmp/resume/.gitkeep
+tmp/resume/final-1.png
+tmp/resume/final-2.png
+tmp/resume/replace_project.py
+tmp/resume/skills-final-1.png
+tmp/resume/skills-final-2.png
+tmp/resume/source-1.png
+tmp/resume/source-2.png
+tmp/resume/update_technical_skills.py

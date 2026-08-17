@@ -107,7 +107,7 @@ export class LobbyController {
     if (cmd === "!queue") return void this.showQueue();
     if (cmd === "!cmds") return void this.room.say("Command list: https://ronaldonater.com/osu-ahr");
     if (["!regulations"].includes(cmd)) return void this.showRegulations();
-    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.0");
+    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.2");
     if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p);
     if (["!timeleft", "!tl"].includes(cmd)) return void this.timeleft();
     if (["!ostats", "!os"].includes(cmd)) return void this.stats(p);
@@ -123,6 +123,7 @@ export class LobbyController {
     if (cmd === "!stop" && this.isHost(p)) return void this.stopTimer();
     if (cmd === "*start") return void this.startMatch(0);
     if (cmd === "*skip") return void this.skip();
+    if (cmd === "*abort") return void this.abortMatch();
     if (cmd === "*order") return void this.order(value);
     if (cmd === "*resetelo") return void this.resetElo(args[0]);
     if (cmd === "*close") return void this.closeLobby();
@@ -132,7 +133,8 @@ export class LobbyController {
     if (cmd === "*regulation" || cmd === "*no" && args[0] === "regulation") return void this.regulation(cmd === "*no" ? ["disable"] : args);
     if (cmd === "*denylist") return void this.denylist(args);
   }
-  private async vote(kind: string, p: Participant) { const r = this.votes.cast(kind, p.id, this.room.players()); await this.room.say(`${kind}: ${r.count}/${r.required}`); if (r.passed) { this.votes.clear(); if (kind === "skip") await this.skip(); if (kind === "start") await this.startMatch(5); if (kind === "abort") await this.room.command("!mp abort"); } }
+  private async vote(kind: string, p: Participant) { const r = this.votes.cast(kind, p.id, this.room.players()); await this.room.say(`${kind}: ${r.count}/${r.required}`); if (r.passed) { this.votes.clear(); if (kind === "skip") await this.skip(); if (kind === "start") await this.startMatch(5); if (kind === "abort") await this.abortMatch(); } }
+  private async abortMatch() { await this.room.command("!mp abort"); await this.room.say("Match aborted."); }
   private async showQueue() { const rows = await this.db.player.findMany({ where: { id: { in: this.queue } } }); await this.room.say(`Queue: ${this.queue.map((id, i) => `${i + 1}. ${rows.find(x => x.id === id)?.username ?? id}`).join(" | ") || "empty"}`); }
   private async showRegulations() {
     await this.room.say(this.regulationSummary());
@@ -144,7 +146,8 @@ export class LobbyController {
     const length = r.minLength !== undefined || r.maxLength !== undefined ? `${r.minLength !== undefined ? fmt(r.minLength) : "any"}–${r.maxLength !== undefined ? fmt(r.maxLength) : "any"}` : "any length";
     const mode = r.gameMode ? r.gameMode[0].toUpperCase() + r.gameMode.slice(1) : "any mode";
     const statuses = r.allowedStatuses?.length ? r.allowedStatuses.join(", ") : "all statuses";
-    return `Map regulations — Stars: ${stars} | Length: ${length} | Mode: ${mode} | Status: ${statuses} | Converts: ${r.allowConvert ? "allowed" : "not allowed"} | Free mod: ${r.freeMod ? "enabled" : "disabled"}.`;
+    const range = (min: number | undefined, max: number | undefined, suffix = "") => min !== undefined || max !== undefined ? `${min ?? "any"}–${max ?? "any"}${suffix}` : "any";
+    return `Map regulations — Stars: ${stars} | Length: ${length} | BPM: ${range(r.minBpm, r.maxBpm)} | AR: ${range(r.minAr, r.maxAr)} | HP: ${range(r.minHp, r.maxHp)} | OD: ${range(r.minOd, r.maxOd)} | CS: ${range(r.minCs, r.maxCs)} | Year: ${range(r.minLastUpdatedYear, r.maxLastUpdatedYear)} | Mode: ${mode} | Status: ${statuses} | Converts: ${r.allowConvert ? "allowed" : "not allowed"} | Free mod: ${r.freeMod ? "enabled" : "disabled"}.`;
   }
   private async skip() { if (this.queue.length) this.queue.push(this.queue.shift()!); const next = this.queue[0]; this.turnHostId = undefined; if (next) await this.room.command(`!mp host #${next}`); this.reapplyTitle(); this.reapplyPassword(); this.reapplyFreeMod(); setTimeout(() => this.hostChanged(this.room.host()), 500); await this.showQueue(); }
   private async startMatch(seconds: number) { if (!Number.isFinite(seconds) || seconds < 0 || seconds > 120) return void this.room.say("Start delay must be between 0 and 120 seconds."); const mapId = this.room.beatmapId(); if (!mapId) return void this.room.say("Select a beatmap first."); const reason = checkMap(await this.osu.beatmap(mapId), this.config.regulations); if (reason) return void this.room.say(`Map rejected: ${reason}.`); this.clearTurnTimer(); this.stopTimer(); this.timer = setTimeout(() => void this.launch(mapId), seconds * 1000); await this.room.say(`Match starts in ${seconds}s.`); }
@@ -256,12 +259,13 @@ export class LobbyController {
   private async playtime(p: Participant) { const lp = await this.db.lobbyPlayer.findUnique({ where: { lobbyId_playerId: { lobbyId: this.lobbyId, playerId: p.id } }, include: { player: true } }); if (lp) await this.room.say(`${p.username}: session ${fmt(Math.floor((Date.now() - lp.sessionStart.getTime()) / 1000))}; total ${fmt(lp.player.playSeconds)}.`); }
   private async timeleft() { if (!this.startedAt || !this.room.beatmapId()) return void this.room.say("No active match."); const map = await this.osu.beatmap(this.room.beatmapId()!); await this.room.say(`About ${fmt(Math.max(0, map.length - Math.floor((Date.now() - this.startedAt.getTime()) / 1000)))} left.`); }
   private async stats(p: Participant) { const x = await this.db.player.findUnique({ where: { id: p.id } }); if (x) await this.room.say(`${x.username}: ELO ${x.elo}, LWS ${x.longestStreak}, matches ${x.matches}, win rate ${winRate(x)}%.`); }
-  private async top() { const x = await this.db.player.findMany({ orderBy: { elo: "desc" }, take: 10 }); await this.room.say(`Top: ${x.map((p, i) => `#${i + 1} ${p.username} (${p.elo})`).join(" | ")}`); }
+  private async top() { const x = await this.db.player.findMany({ where: { matches: { gt: 0 } }, orderBy: [{ elo: "desc" }, { id: "asc" }], take: 10 }); await this.room.say(x.length ? `Top: ${x.map((p, i) => `#${i + 1} ${p.username} (${p.elo})`).join(" | ")}` : "No completed matches have been recorded yet."); }
   private async rank(p: Participant) {
     const player = await this.db.player.findUnique({ where: { id: p.id } });
-    if (!player) return void this.room.say(`${p.username}: no local ranking yet.`);
-    const ahead = await this.db.player.count({ where: { OR: [{ elo: { gt: player.elo } }, { elo: player.elo, id: { lt: player.id } }] } });
-    const total = await this.db.player.count();
+    if (!player || player.matches === 0) return void this.room.say(`${p.username}: complete a match to receive a local ranking.`);
+    const eligible = { matches: { gt: 0 } };
+    const ahead = await this.db.player.count({ where: { AND: [eligible, { OR: [{ elo: { gt: player.elo } }, { elo: player.elo, id: { lt: player.id } }] }] } });
+    const total = await this.db.player.count({ where: eligible });
     await this.room.say(`${player.username}: AHR rank #${ahead + 1} of ${total} (ELO ${player.elo}).`);
   }
   private async lastScore() { const m = await this.db.match.findFirst({ where: { lobbyId: this.lobbyId, endedAt: { not: null } }, orderBy: { endedAt: "desc" }, include: { scores: { include: { player: true }, orderBy: { placement: "asc" } } } }); await this.room.say(m ? `Last: ${m.scores.map(s => `${s.placement}. ${s.player.username} ${s.score}`).join(" | ")}` : "No completed match."); }
@@ -319,7 +323,7 @@ export class LobbyController {
         else {
           const [k, v] = raw.split("=");
           if (k === "gamemode" && ["osu", "taiko", "fruits", "mania"].includes(v)) this.config.regulations.gameMode = v as any;
-          else if (["min_star", "max_star", "min_length", "max_length"].includes(k) && v && Number.isFinite(Number(v))) (this.config.regulations as any)[k.replace(/_([a-z])/g, (_, x) => x.toUpperCase())] = Number(v);
+          else if (["min_star", "max_star", "min_length", "max_length", "min_bpm", "max_bpm", "min_ar", "max_ar", "min_hp", "max_hp", "min_od", "max_od", "min_cs", "max_cs", "min_last_updated_year", "max_last_updated_year"].includes(k) && v && Number.isFinite(Number(v))) (this.config.regulations as any)[k.replace(/_([a-z])/g, (_, x) => x.toUpperCase())] = Number(v);
         }
       }
     }

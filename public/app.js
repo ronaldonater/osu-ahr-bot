@@ -7,7 +7,7 @@ function number(value) { return value === '' ? undefined : Number(value); }
 function payload(form) {
   const data = new FormData(form); const statuses = data.get('statuses').trim();
   const regulations = { enabled: data.has('regulationsEnabled'), freeMod: data.has('freeMod'), allowConvert: data.has('allowConvert') };
-  for (const [formName, key] of [['minStar', 'minStar'], ['maxStar', 'maxStar'], ['minLength', 'minLength'], ['maxLength', 'maxLength']]) { const value = number(data.get(formName)); if (value !== undefined) regulations[key] = value; }
+  for (const [formName, key] of [['minStar', 'minStar'], ['maxStar', 'maxStar'], ['minLength', 'minLength'], ['maxLength', 'maxLength'], ['minBpm', 'minBpm'], ['maxBpm', 'maxBpm'], ['minAr', 'minAr'], ['maxAr', 'maxAr'], ['minHp', 'minHp'], ['maxHp', 'maxHp'], ['minOd', 'minOd'], ['maxOd', 'maxOd'], ['minCs', 'minCs'], ['maxCs', 'maxCs'], ['minLastUpdatedYear', 'minLastUpdatedYear'], ['maxLastUpdatedYear', 'maxLastUpdatedYear']]) { const value = number(data.get(formName)); if (value !== undefined) regulations[key] = value; }
   if (data.get('gameMode')) regulations.gameMode = data.get('gameMode');
   if (statuses) regulations.allowedStatuses = statuses.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
   const result = { title: data.get('title').trim(), config: { regulations, eventChance: number(data.get('eventChance')) / 100 } };

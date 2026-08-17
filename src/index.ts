@@ -16,6 +16,9 @@ const configSchema = z.object({
   regulations: z.object({
     enabled: z.boolean().optional(), minStar: z.number().min(0).optional(), maxStar: z.number().min(0).optional(),
     minLength: z.number().int().min(0).optional(), maxLength: z.number().int().min(0).optional(),
+    minBpm: z.number().min(0).optional(), maxBpm: z.number().min(0).optional(), minAr: z.number().min(0).max(11).optional(), maxAr: z.number().min(0).max(11).optional(),
+    minHp: z.number().min(0).max(10).optional(), maxHp: z.number().min(0).max(10).optional(), minOd: z.number().min(0).max(11).optional(), maxOd: z.number().min(0).max(11).optional(), minCs: z.number().min(0).max(10).optional(), maxCs: z.number().min(0).max(10).optional(),
+    minLastUpdatedYear: z.number().int().min(2007).max(2100).optional(), maxLastUpdatedYear: z.number().int().min(2007).max(2100).optional(),
     gameMode: z.enum(["osu", "taiko", "fruits", "mania"]).optional(), allowConvert: z.boolean().optional(), freeMod: z.boolean().optional(),
     allowedStatuses: z.array(z.string().min(1)).max(10).optional()
   }).partial().optional()
