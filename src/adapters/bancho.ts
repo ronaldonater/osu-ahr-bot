@@ -14,7 +14,7 @@ export interface RoomActions {
   onTitleChanged(listener: (title: string) => void): void;
   onPasswordChanged(listener: () => void): void;
   onFreeModChanged(listener: (enabled: boolean) => void): void;
-  onHostChanged(listener: (host: Participant) => void): void;
+  onHostChanged(listener: (host?: Participant) => void): void;
   onAllPlayersReady(listener: () => void): void;
   onModsChanged(listener: (mods: string[]) => void): void;
   onMatchStarted(listener: () => void): void;
@@ -44,7 +44,7 @@ class BanchoRoom implements RoomActions {
   // tournament rooms, so send the command without waiting for that event.
   setTitle(title: string) { return this.channel.sendMessage(`!mp name ${title}`); }
   players(): Participant[] { return (this.channel.lobby?.slots ?? []).filter((s: any) => s?.user).map((s: any) => ({ id: s.user.id, username: s.user.ircUsername })); }
-  host() { const h = this.channel.lobby?.getHost?.(); return h ? { id: h.user.id, username: h.user.ircUsername } : undefined; }
+  host() { const h = this.channel.lobby?.getHost?.(); return h?.user ? { id: h.user.id, username: h.user.ircUsername } : undefined; }
   beatmapId() { return this.channel.lobby?.beatmapId; }
   id() { return this.channel.lobby.id; }
   onMessage(listener: (sender: Participant, text: string) => void) { this.channel.on("message", (m: any) => listener({ id: m.user.id, username: m.user.ircUsername }, m.message)); }
@@ -62,7 +62,7 @@ class BanchoRoom implements RoomActions {
   }
   onPasswordChanged(listener: () => void) { this.channel.lobby.on("passwordChanged", listener); this.channel.lobby.on("passwordRemoved", listener); }
   onFreeModChanged(listener: (enabled: boolean) => void) { this.channel.lobby.on("freemod", listener); }
-  onHostChanged(listener: (host: Participant) => void) { this.channel.lobby.on("host", (player: any) => listener({ id: player.user.id, username: player.user.ircUsername })); }
+  onHostChanged(listener: (host?: Participant) => void) { this.channel.lobby.on("host", (player: any) => listener(player?.user ? { id: player.user.id, username: player.user.ircUsername } : undefined)); }
   onAllPlayersReady(listener: () => void) { this.channel.lobby.on("allPlayersReady", listener); }
   onModsChanged(listener: (mods: string[]) => void) { this.channel.lobby.on("mods", (mods: any) => listener((Array.isArray(mods) ? mods : []).filter(Boolean).map(mod => mod.shortMod).filter(Boolean))); }
   onMatchStarted(listener: () => void) { this.channel.lobby.on("matchStarted", listener); }
