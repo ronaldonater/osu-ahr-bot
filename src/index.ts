@@ -25,7 +25,7 @@ const configSchema = z.object({
 }).partial();
 
 async function createLobby(input: { title: string; password?: string; config?: Partial<LobbyConfig> }) {
-  const config: LobbyConfig = { ...DEFAULT_CONFIG, ...input.config, password: input.password, regulations: { ...DEFAULT_CONFIG.regulations, ...input.config?.regulations }, locks: { ...DEFAULT_CONFIG.locks, ...input.config?.locks } };
+  const config: LobbyConfig = { ...DEFAULT_CONFIG, ...input.config, title: input.title, password: input.password, regulations: { ...DEFAULT_CONFIG.regulations, ...input.config?.regulations }, locks: { ...DEFAULT_CONFIG.locks, ...input.config?.locks } };
   const room = await bancho.makeLobby(input.title, input.password);
   const banchoId = room.id();
   if (!banchoId) throw new Error("Could not identify newly-created multiplayer lobby");
@@ -49,8 +49,8 @@ async function main() {
   app.patch("/lobbies/:id/regulations", async (req, res, next) => { try {
     const id = z.coerce.number().int().positive().parse(req.params.id); const controller = controllers.get(id);
     if (!controller) return res.status(404).json({ error: "This lobby is not active in the current bot session." });
-    const body = z.object({ regulations: configSchema.shape.regulations.unwrap(), eventChance: z.number().min(0).max(1).optional() }).parse(req.body);
-    await controller.updateRegulations(body.regulations ?? {}, body.eventChance);
+    const body = z.object({ regulations: configSchema.shape.regulations.unwrap(), eventChance: z.number().min(0).max(1).optional(), title: z.string().min(3).max(80).optional(), password: z.string().min(1).max(64).optional(), removePassword: z.boolean().optional() }).parse(req.body);
+    await controller.updateRegulations(body.regulations ?? {}, body.eventChance, body);
     return res.json({ ok: true });
   } catch (e) { next(e); } });
   app.delete("/lobbies/:id", async (req, res, next) => { try {

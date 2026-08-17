@@ -238,7 +238,7 @@ export class LobbyController {
     this.activeBeatmapId = mapId; this.startedAt = new Date(); this.votes.clear(); this.reapplyTitle(); this.reapplyPassword();
   }
   private stopTimer() { if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
-  private async finish(scores: Array<{ player: Participant; score: number; team?: "red" | "blue" }>) { if (!this.matchId) return; const ordered = [...scores].sort((a, b) => b.score - a.score); const ratedMatch = ordered.length > 1; const avg = (await this.db.player.findMany({ where: { id: { in: ordered.map(x => x.player.id) } } })).reduce((s, p, _, a) => s + p.elo / a.length, 0); for (const [i, s] of ordered.entries()) { const winner = this.teamEvent ? s.team === ordered[0].team : i === 0; const player = await this.db.player.findUniqueOrThrow({ where: { id: s.player.id } }); await this.db.$transaction([this.db.score.create({ data: { matchId: this.matchId, playerId: s.player.id, score: s.score, placement: i + 1, team: s.team, winner } }), this.db.player.update({ where: { id: s.player.id }, data: { ...(ratedMatch ? { elo: newRating(player.elo, avg, winner ? 1 : 0) } : {}), matches: { increment: 1 }, wins: { increment: winner ? 1 : 0 }, streak: winner ? { increment: 1 } : 0, longestStreak: winner ? Math.max(player.longestStreak, player.streak + 1) : player.longestStreak } })]); }
+  private async finish(scores: Array<{ player: Participant; score: number; team?: "red" | "blue" }>) { if (!this.matchId) return; const ordered = [...scores].sort((a, b) => b.score - a.score); const ratedMatch = ordered.length > 1; const avg = ratedMatch ? (await this.db.player.findMany({ where: { id: { in: ordered.map(x => x.player.id) } } })).reduce((s, p, _, a) => s + p.elo / a.length, 0) : 0; for (const [i, s] of ordered.entries()) { const winner = this.teamEvent ? s.team === ordered[0].team : i === 0; const player = ratedMatch ? await this.db.player.findUniqueOrThrow({ where: { id: s.player.id } }) : undefined; await this.db.$transaction([this.db.score.create({ data: { matchId: this.matchId, playerId: s.player.id, score: s.score, placement: i + 1, team: s.team, winner } }), ...(ratedMatch ? [this.db.player.update({ where: { id: s.player.id }, data: { elo: newRating(player!.elo, avg, winner ? 1 : 0), matches: { increment: 1 }, wins: { increment: winner ? 1 : 0 }, streak: winner ? { increment: 1 } : 0, longestStreak: winner ? Math.max(player!.longestStreak, player!.streak + 1) : player!.longestStreak } })] : [])]); }
     await this.db.match.update({ where: { id: this.matchId }, data: { endedAt: new Date() } });
     const mapId = this.activeBeatmapId; const startedAt = this.startedAt; const participants = ordered.map(x => ({ ...x.player, matchScore: x.score }));
     this.matchId = undefined; this.activeBeatmapId = undefined; this.startedAt = undefined;
@@ -305,11 +305,20 @@ export class LobbyController {
     await this.room.say(`Random event chance set to ${percent}%.`);
   }
   async close() { await this.closeLobby(); }
-  async updateRegulations(regulations: Partial<LobbyConfig["regulations"]>, eventChance?: number) {
+  async updateRegulations(regulations: Partial<LobbyConfig["regulations"]>, eventChance?: number, details?: { title?: string; password?: string; removePassword?: boolean }) {
     this.config.regulations = { ...DEFAULT_CONFIG.regulations, ...regulations };
     if (eventChance !== undefined) this.config.eventChance = eventChance;
+    if (details?.title && details.title !== this.config.title) {
+      this.config.title = details.title;
+      await this.room.setTitle(details.title);
+    }
+    if (details?.removePassword || details?.password) {
+      this.config.password = details.removePassword ? undefined : details.password;
+      this.passwordSetUntil = Date.now() + 3_000;
+      await this.room.command(this.config.password ? `!mp password ${this.config.password}` : "!mp password");
+    }
     this.reapplyFreeMod();
-    await this.persist();
+    await this.db.lobby.update({ where: { id: this.lobbyId }, data: { name: this.config.title, password: this.config.password, config: this.config as any } });
     await this.room.say(`Lobby settings updated from the dashboard. ${this.regulationSummary()} Random events: ${(this.config.eventChance * 100).toFixed(0)}%.`);
   }
   private async updateMap() { const id = this.room.beatmapId(); if (!id) return void this.room.say("Select a beatmap first."); const map = await this.osu.beatmap(id); await this.room.command(`!mp map ${map.id}`); await this.room.say(`Map refreshed: ${map.version}.`); }
