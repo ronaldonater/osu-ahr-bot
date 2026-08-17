@@ -28,6 +28,8 @@ curl -X POST http://localhost:3000/lobbies -H "Authorization: Bearer YOUR_TOKEN"
 
 All requested player, host, administrator, information, and ranking command listeners are in `src/lobby-controller.ts`. `!skip`/`!start` use a simple-majority vote for non-hosts; the host executes them directly. ELO starts at 1000 and uses a K-factor of 32. Every completed game advances the host queue. Random team events use a descending greedy ELO-balancing split, then restore the configured Head-to-Head settings.
 
+Players can use `!cmds` in a lobby to receive the full public command list: [ronaldonater.com/osu-ahr](https://ronaldonater.com/osu-ahr).
+
 Administrators may reset the competitive leaderboard with `*resetelo confirm`. This resets ELO, wins, matches, and streaks for every player, but retains lobby and match history.
 
 ## Production notes
