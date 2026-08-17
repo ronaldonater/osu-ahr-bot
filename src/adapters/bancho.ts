@@ -16,6 +16,7 @@ export interface RoomActions {
   onFreeModChanged(listener: (enabled: boolean) => void): void;
   onHostChanged(listener: (host: Participant) => void): void;
   onAllPlayersReady(listener: () => void): void;
+  onModsChanged(listener: (mods: string[]) => void): void;
   onMatchStarted(listener: () => void): void;
   onMatchFinished(listener: (scores: Array<{ player: Participant; score: number; team?: "red" | "blue" }>) => void): void;
 }
@@ -63,6 +64,7 @@ class BanchoRoom implements RoomActions {
   onFreeModChanged(listener: (enabled: boolean) => void) { this.channel.lobby.on("freemod", listener); }
   onHostChanged(listener: (host: Participant) => void) { this.channel.lobby.on("host", (player: any) => listener({ id: player.user.id, username: player.user.ircUsername })); }
   onAllPlayersReady(listener: () => void) { this.channel.lobby.on("allPlayersReady", listener); }
+  onModsChanged(listener: (mods: string[]) => void) { this.channel.lobby.on("mods", (mods: any[]) => listener(mods.map(mod => mod.shortMod))); }
   onMatchStarted(listener: () => void) { this.channel.lobby.on("matchStarted", listener); }
   onMatchFinished(listener: (scores: any[]) => void) { this.channel.lobby.on("matchFinished", (scores: any[]) => listener(scores.map((s: any) => ({ player: { id: s.player.user.id, username: s.player.user.ircUsername }, score: s.score, team: s.player.team })))); }
 }

@@ -25,6 +25,7 @@ export class LobbyController {
     this.room.onFreeModChanged(enabled => void this.enforceFreeMod(enabled));
     this.room.onHostChanged(host => void this.hostChanged(host));
     this.room.onAllPlayersReady(() => void this.allPlayersReady());
+    this.room.onModsChanged(mods => void this.enforceDefaultMods(mods));
     this.room.onMatchStarted(() => void this.beginMatch());
     this.room.onMatchFinished(s => void this.finish(s));
     this.reapplyFreeMod();
@@ -195,6 +196,12 @@ export class LobbyController {
     this.reapplyFreeMod();
     await this.room.say(`Free mod is regulated and has been restored to ${this.config.regulations.freeMod ? "enabled" : "disabled"}.`);
   }
+  private async enforceDefaultMods(mods: string[]) {
+    const blocked = mods.filter(mod => ["DT", "NC", "HT"].includes(mod.toUpperCase()));
+    if (!blocked.length) return;
+    this.reapplyFreeMod();
+    await this.room.say(`${blocked.join("/")} is not allowed as a lobby modifier. Restored permitted mods.`);
+  }
   private async launch(mapId: number) {
     this.eventActive = Math.random() < this.config.eventChance;
     this.teamEvent = false;
@@ -227,18 +234,19 @@ export class LobbyController {
   private stopTimer() { if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
   private async finish(scores: Array<{ player: Participant; score: number; team?: "red" | "blue" }>) { if (!this.matchId) return; const ordered = [...scores].sort((a, b) => b.score - a.score); const avg = (await this.db.player.findMany({ where: { id: { in: ordered.map(x => x.player.id) } } })).reduce((s, p, _, a) => s + p.elo / a.length, 0); for (const [i, s] of ordered.entries()) { const winner = this.teamEvent ? s.team === ordered[0].team : i === 0; const player = await this.db.player.findUniqueOrThrow({ where: { id: s.player.id } }); await this.db.$transaction([this.db.score.create({ data: { matchId: this.matchId, playerId: s.player.id, score: s.score, placement: i + 1, team: s.team, winner } }), this.db.player.update({ where: { id: s.player.id }, data: { elo: newRating(player.elo, avg, winner ? 1 : 0), matches: { increment: 1 }, wins: { increment: winner ? 1 : 0 }, streak: winner ? { increment: 1 } : 0, longestStreak: winner ? Math.max(player.longestStreak, player.streak + 1) : player.longestStreak } })]); }
     await this.db.match.update({ where: { id: this.matchId }, data: { endedAt: new Date() } });
-    const mapId = this.activeBeatmapId; const startedAt = this.startedAt; const participants = ordered.map(x => x.player);
+    const mapId = this.activeBeatmapId; const startedAt = this.startedAt; const participants = ordered.map(x => ({ ...x.player, matchScore: x.score }));
     this.matchId = undefined; this.activeBeatmapId = undefined; this.startedAt = undefined;
     if (mapId && startedAt) setTimeout(() => void this.announceLeaderboardScores(mapId, startedAt, participants), 10_000);
     if (this.eventActive) { await this.room.command(`!mp set ${this.config.teamMode} ${this.config.scoreMode}`); this.teamEvent = false; this.eventActive = false; } await this.skip(); }
-  private async announceLeaderboardScores(mapId: number, startedAt: Date, players: Participant[]) {
+  private async announceLeaderboardScores(mapId: number, startedAt: Date, players: Array<Participant & { matchScore: number }>) {
     await Promise.all(players.map(async player => {
       try {
         const result = await this.osu.userBeatmapBestScore(mapId, player.id);
         const recordedAt = result?.score.created_at ? Date.parse(result.score.created_at) : NaN;
         // Ignore a player's existing leaderboard score: it must have been set in this match.
-        if (!result?.position || !Number.isFinite(recordedAt) || recordedAt < startedAt.getTime() - 120_000) return;
+        if (!result?.position || result.position > 50 || !Number.isFinite(recordedAt) || recordedAt < startedAt.getTime() - 120_000) return;
         const score = result.score; const points = score.legacy_total_score || score.total_score || score.score || 0;
+        if (points !== player.matchScore) return;
         const mods = (score.mods ?? []).map(m => typeof m === "string" ? m : m.acronym ?? "").filter(Boolean).join("") || "NM";
         const pp = score.pp === undefined ? "" : ` (${score.pp.toFixed(2)}pp)`;
         await this.room.say(`Congratulations ${player.username}! Your ${points.toLocaleString()} +${mods}${pp} score is now global #${result.position} on this map!`);
