@@ -107,7 +107,7 @@ export class LobbyController {
     if (cmd === "!queue") return void this.showQueue();
     if (cmd === "!cmds") return void this.room.say("Command list: https://ronaldonater.com/osu-ahr");
     if (["!regulations"].includes(cmd)) return void this.showRegulations();
-    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.2");
+    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.3");
     if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p);
     if (["!timeleft", "!tl"].includes(cmd)) return void this.timeleft();
     if (["!ostats", "!os"].includes(cmd)) return void this.stats(p);
@@ -302,6 +302,13 @@ export class LobbyController {
     await this.room.say(`Random event chance set to ${percent}%.`);
   }
   async close() { await this.closeLobby(); }
+  async updateRegulations(regulations: Partial<LobbyConfig["regulations"]>, eventChance?: number) {
+    this.config.regulations = { ...DEFAULT_CONFIG.regulations, ...regulations };
+    if (eventChance !== undefined) this.config.eventChance = eventChance;
+    this.reapplyFreeMod();
+    await this.persist();
+    await this.room.say(`Lobby settings updated from the dashboard. ${this.regulationSummary()} Random events: ${(this.config.eventChance * 100).toFixed(0)}%.`);
+  }
   private async updateMap() { const id = this.room.beatmapId(); if (!id) return void this.room.say("Select a beatmap first."); const map = await this.osu.beatmap(id); await this.room.command(`!mp map ${map.id}`); await this.room.say(`Map refreshed: ${map.version}.`); }
   private async keep(a: string[]) { const [kind, ...rest] = a; let confirmation = ""; if (kind === "size") { const size = Number(rest[0]); if (!Number.isInteger(size) || size < 1 || size > 16) return void this.room.say("Lobby size must be 1-16."); this.config.size = size; this.config.locks.size = true; await this.room.command(`!mp size ${this.config.size}`); confirmation = `Lobby size locked to ${size}.`; } if (kind === "password") { if (!this.config.password) return void this.room.say("This lobby was created passwordless, so password locking is not allowed."); const password = rest.join(" "); if (!password) return void this.room.say("Usage: *keep password [password]."); this.config.password = password; this.config.locks.password = true; this.passwordSetUntil = Date.now() + 3_000; await this.room.command(`!mp password ${this.config.password}`); confirmation = "Lobby password lock enabled."; } if (kind === "mode") { this.config.teamMode = Number(rest[0]) as 0; this.config.scoreMode = Number(rest[1]) as 0; this.config.locks.mode = true; await this.room.command(`!mp set ${this.config.teamMode} ${this.config.scoreMode}`); confirmation = "Lobby mode lock enabled."; } if (kind === "mods") { this.config.mods = rest; this.config.locks.mods = true; await this.room.command(`!mp mods ${rest.join(" ")}`); confirmation = `Mod lock enabled: ${rest.join(" ") || "None"}.`; } if (kind === "title") { const title = rest.join(" "); if (!title) return void this.room.say("Usage: *keep title [title]."); this.config.title = title; this.config.locks.title = true; await this.room.setTitle(this.config.title); confirmation = `Lobby title locked to: ${this.config.title}.`; } await this.persist(); if (confirmation) await this.room.say(confirmation); }
   private async noKeep(kind?: string) { if (kind === "mod") kind = "mods"; if (!kind || !["size", "password", "mode", "mods", "title"].includes(kind)) return void this.room.say("Unknown lobby lock. Use size, password, mode, mod, or title."); const wasLocked = Boolean(this.config.locks[kind as keyof LobbyConfig["locks"]]); delete this.config.locks[kind as keyof LobbyConfig["locks"]]; await this.persist(); await this.room.say(wasLocked ? `${kind === "mods" ? "Mod" : kind[0].toUpperCase() + kind.slice(1)} lock removed.` : `${kind === "mods" ? "Mod" : kind[0].toUpperCase() + kind.slice(1)} lock was not enabled.`); }

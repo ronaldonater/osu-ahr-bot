@@ -1,0 +1,22 @@
+.lobbies article {
+  display: grid;
+  grid-template-columns: 1fr auto;
+}
+
+.regulations {
+  grid-column: 1 / -1;
+}
+
+.regulations summary {
+  color: var(--accent);
+  cursor: pointer;
+  margin-top: 4px;
+}
+
+.regulations form {
+  padding-top: 8px;
+}
+
+@media (max-width: 650px) {
+  .lobbies article { grid-template-columns: 1fr; }
+}

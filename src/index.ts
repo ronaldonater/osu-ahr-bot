@@ -46,6 +46,13 @@ async function main() {
     const body = z.object({ title: z.string().min(3).max(80), password: z.string().max(64).optional(), config: configSchema.optional() }).parse(req.body);
     res.status(201).json(await createLobby(body as { title: string; password?: string; config?: Partial<LobbyConfig> }));
   } catch (e) { next(e); } });
+  app.patch("/lobbies/:id/regulations", async (req, res, next) => { try {
+    const id = z.coerce.number().int().positive().parse(req.params.id); const controller = controllers.get(id);
+    if (!controller) return res.status(404).json({ error: "This lobby is not active in the current bot session." });
+    const body = z.object({ regulations: configSchema.shape.regulations.unwrap(), eventChance: z.number().min(0).max(1).optional() }).parse(req.body);
+    await controller.updateRegulations(body.regulations ?? {}, body.eventChance);
+    return res.json({ ok: true });
+  } catch (e) { next(e); } });
   app.delete("/lobbies/:id", async (req, res, next) => { try {
     const id = z.coerce.number().int().positive().parse(req.params.id); const controller = controllers.get(id);
     if (!controller) return res.status(404).json({ error: "This lobby is not active in the current bot session." });
