@@ -245,19 +245,33 @@ export class LobbyController {
     if (mapId && startedAt) setTimeout(() => void this.announceLeaderboardScores(mapId, startedAt, participants), 10_000);
     if (this.eventActive) { await this.room.command(`!mp set ${this.config.teamMode} ${this.config.scoreMode}`); this.teamEvent = false; this.eventActive = false; } await this.skip(); }
   private async announceLeaderboardScores(mapId: number, startedAt: Date, players: Array<Participant & { matchScore: number }>) {
-    await Promise.all(players.map(async player => {
+    // Newly-submitted scores can take longer than a few seconds to appear in
+    // the public API. Retry for two minutes, while still requiring this exact
+    // match score to be in the map's top 50.
+    await Promise.all(players.map(player => this.announceLeaderboardScore(mapId, startedAt, player)));
+  }
+  private async announceLeaderboardScore(mapId: number, startedAt: Date, player: Participant & { matchScore: number }) {
+    for (let attempt = 0; attempt < 12; attempt++) {
       try {
         const result = await this.osu.userBeatmapBestScore(mapId, player.id);
         const recordedAt = result?.score.created_at ? Date.parse(result.score.created_at) : NaN;
         // Ignore a player's existing leaderboard score: it must have been set in this match.
-        if (!result?.position || result.position > 50 || !Number.isFinite(recordedAt) || recordedAt < startedAt.getTime() - 120_000) return;
+        if (!result?.position || result.position > 50 || !Number.isFinite(recordedAt) || recordedAt < startedAt.getTime() - 120_000) {
+          if (attempt < 11) await new Promise(resolve => setTimeout(resolve, 10_000));
+          continue;
+        }
         const score = result.score; const points = score.legacy_total_score || score.total_score || score.score || 0;
-        if (points !== player.matchScore) return;
+        if (points !== player.matchScore) {
+          if (attempt < 11) await new Promise(resolve => setTimeout(resolve, 10_000));
+          continue;
+        }
         const mods = (score.mods ?? []).map(m => typeof m === "string" ? m : m.acronym ?? "").filter(Boolean).join("") || "NM";
         const pp = score.pp === undefined ? "" : ` (${score.pp.toFixed(2)}pp)`;
         await this.room.say(`Congratulations ${player.username}! Your ${points.toLocaleString()} +${mods}${pp} score is now global #${result.position} on this map!`);
+        return;
       } catch { /* A delayed leaderboard lookup should never disrupt lobby rotation. */ }
-    }));
+      if (attempt < 11) await new Promise(resolve => setTimeout(resolve, 10_000));
+    }
   }
   private async playtime(p: Participant) { const lp = await this.db.lobbyPlayer.findUnique({ where: { lobbyId_playerId: { lobbyId: this.lobbyId, playerId: p.id } }, include: { player: true } }); if (lp) await this.room.say(`${p.username}: session ${fmt(Math.floor((Date.now() - lp.sessionStart.getTime()) / 1000))}; total ${fmt(lp.player.playSeconds)}.`); }
   private async timeleft() { if (!this.startedAt || !this.room.beatmapId()) return void this.room.say("No active match."); const map = await this.osu.beatmap(this.room.beatmapId()!); await this.room.say(`About ${fmt(Math.max(0, map.length - Math.floor((Date.now() - this.startedAt.getTime()) / 1000)))} left.`); }
