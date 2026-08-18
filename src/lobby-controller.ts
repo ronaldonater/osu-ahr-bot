@@ -108,7 +108,7 @@ export class LobbyController {
     if (cmd === "!queue") return void this.showQueue();
     if (cmd === "!cmds") return void this.room.say("Command list: https://ronaldonater.com/osu-ahr");
     if (["!regulations"].includes(cmd)) return void this.showRegulations();
-    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.5");
+    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.6");
     if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p);
     if (["!timeleft", "!tl"].includes(cmd)) return void this.timeleft();
     if (["!ostats", "!os"].includes(cmd)) return void this.stats(p, value || undefined);
@@ -310,14 +310,14 @@ export class LobbyController {
     if (!player) return void this.room.say(`${username ?? p.username}: no local stats found.`);
     await this.room.say(`${player.username}: ELO ${player.elo}, LWS ${player.longestStreak}, matches ${player.matches}, win rate ${winRate(player)}%.`);
   }
-  private async top() { const x = await this.db.player.findMany({ where: { matches: { gt: 0 } }, orderBy: [{ elo: "desc" }, { id: "asc" }], take: 10 }); await this.room.say(x.length ? `Top: ${x.map((p, i) => `#${i + 1} ${p.username} (${p.elo})`).join(" | ")}` : "No completed matches have been recorded yet."); }
+  private async top() { const x = await this.db.player.findMany({ where: { matches: { gte: 3 } }, orderBy: [{ elo: "desc" }, { id: "asc" }], take: 10 }); await this.room.say(x.length ? `Top: ${x.map((p, i) => `#${i + 1} ${p.username} (${p.elo})`).join(" | ")}` : "No players have completed the 3 matches required for local rankings yet."); }
   private async rank(p: Participant, username?: string) {
     const player = username
       ? (await this.db.player.findMany({ where: { username: { contains: username } }, take: 10 })).find(candidate => candidate.username.toLowerCase() === username.toLowerCase())
       : await this.db.player.findUnique({ where: { id: p.id } });
     if (!player) return void this.room.say(`${username ?? p.username}: no local ranking found.`);
-    if (player.matches === 0) return void this.room.say(`${player.username}: complete a match to receive a local ranking.`);
-    const eligible = { matches: { gt: 0 } };
+    if (player.matches < 3) return void this.room.say(`${player.username}: complete at least 3 matches to receive a local ranking.`);
+    const eligible = { matches: { gte: 3 } };
     const ahead = await this.db.player.count({ where: { AND: [eligible, { OR: [{ elo: { gt: player.elo } }, { elo: player.elo, id: { lt: player.id } }] }] } });
     const total = await this.db.player.count({ where: eligible });
     await this.room.say(`${player.username}: AHR rank #${ahead + 1} of ${total} (ELO ${player.elo}).`);
