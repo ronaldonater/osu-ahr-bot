@@ -20,3 +20,17 @@
 @media (max-width: 650px) {
   .lobbies article { grid-template-columns: 1fr; }
 }
+
+.pagination {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  padding-top: 18px;
+  color: var(--muted);
+}
+
+.pagination button:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}

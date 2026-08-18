@@ -3,16 +3,17 @@ import type { RoomActions } from "./adapters/bancho.js";
 import { OsuApiRequestError, type OsuApi } from "./adapters/osu.js";
 import { DEFAULT_CONFIG, type LobbyConfig, type Participant } from "./types.js";
 import { checkMap } from "./services/regulations.js";
-import { newRating, winRate } from "./services/elo.js";
+import { fractionalElo, winRate } from "./services/elo.js";
 import { balancedTeams } from "./services/teams.js";
 import { VoteBook } from "./services/votes.js";
 
 const admins = new Set((process.env.ADMIN_OSU_IDS ?? "").split(",").filter(Boolean).map(Number));
 const fmt = (s: number) => `${Math.floor(s / 60)}m ${s % 60}s`;
+const fmtSession = (s: number) => `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ${s % 60}s`;
 
 export class LobbyController {
   private config: LobbyConfig; private queue: number[] = []; private votes = new VoteBook();
-  private timer?: NodeJS.Timeout; private startedAt?: Date; private matchId?: number; private activeBeatmapId?: number; private teamEvent = false; private eventActive = false; private lastValidMapId?: number; private passwordSetUntil = 0; private freeModSetUntil = 0;
+  private timer?: NodeJS.Timeout; private startedAt?: Date; private matchId?: number; private activeBeatmapId?: number; private matchParticipants: Participant[] = []; private teamEvent = false; private eventActive = false; private lastValidMapId?: number; private passwordSetUntil = 0; private freeModSetUntil = 0;
   private turnTimer?: NodeJS.Timeout; private turnWarnings: NodeJS.Timeout[] = []; private turnHostId?: number; private turnMapId?: number; private turnStage?: "select" | "start";
   constructor(private db: PrismaClient, private lobbyId: number, private room: RoomActions, private osu: OsuApi, config: LobbyConfig = DEFAULT_CONFIG) { this.config = config; }
   async start() {
@@ -107,16 +108,16 @@ export class LobbyController {
     if (cmd === "!queue") return void this.showQueue();
     if (cmd === "!cmds") return void this.room.say("Command list: https://ronaldonater.com/osu-ahr");
     if (["!regulations"].includes(cmd)) return void this.showRegulations();
-    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.3");
+    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.5");
     if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p);
     if (["!timeleft", "!tl"].includes(cmd)) return void this.timeleft();
-    if (["!ostats", "!os"].includes(cmd)) return void this.stats(p);
+    if (["!ostats", "!os"].includes(cmd)) return void this.stats(p, value || undefined);
     if (["!top", "!t"].includes(cmd)) return void this.top();
-    if (["!how", "!h"].includes(cmd)) return void this.room.say("ELO starts at 1000. Winners gain and losers lose rating relative to the lobby's average ELO.");
-    if (cmd === "!rank") return void this.rank(p);
+    if (["!how", "!h"].includes(cmd)) return void this.room.say("Ranked H2H uses fractional ELO: placement earns results, exact ties share rank, and disconnects tie last. K is 40 for 0–10 matches, 24 for 11–100, then 16. Results adjust against the lobby's average ELO. Random events are unranked.");
+    if (cmd === "!rank") return void this.rank(p, value || undefined);
     if (["!lastscore", "!ls"].includes(cmd)) return void this.lastScore();
     if (["!bestscore", "!bs"].includes(cmd)) return void this.bestScore(p);
-    if (cmd === "!update") return void this.updateMap();
+    if (cmd === "!update") return void (this.isHost(p) ? this.updateMap() : this.room.say(`${p.username}: only the current host can use !update.`));
     if (cmd === "!skip") return void (this.isHost(p) ? this.skip() : this.vote("skip", p));
     if (cmd === "!start") return void (this.isHost(p) ? this.startMatch(Number(args[0] ?? 5)) : this.vote("start", p));
     if (cmd === "!abort") return void this.vote("abort", p);
@@ -223,14 +224,16 @@ export class LobbyController {
         const ids = this.room.players().map(p => p.id); const ps = await this.db.player.findMany({ where: { id: { in: ids } } }); const teams = balancedTeams(ps);
         await this.room.command(`!mp team Red ${teams.red.map(x => x.username).join(",")}`);
         await this.room.command(`!mp team Blue ${teams.blue.map(x => x.username).join(",")}`);
-        await this.room.say(`Random event: ${event.label}. Balanced teams assigned.`);
-      } else await this.room.say(`Random event: ${event.label}.`);
+        await this.room.say(`Random event: ${event.label} (unranked). Balanced teams assigned.`);
+      } else await this.room.say(`Random event: ${event.label} (unranked).`);
     }
     await this.beginMatch(mapId); await this.room.command("!mp start"); }
   /** Covers bot-started games and games started directly by the current host. */
   private async beginMatch(mapId = this.room.beatmapId()) {
     if (this.matchId) return;
     this.clearTurnTimer();
+    // Keep a start-of-match roster so disconnects remain in the rating result.
+    this.matchParticipants = this.room.players();
     this.matchId = (await this.db.match.create({ data: { lobbyId: this.lobbyId, beatmapId: mapId, teamEvent: this.teamEvent, startedAt: new Date() } })).id;
     // Reapplying Free Mod with `!mp mods 0 freemod` clears every player's
     // individual selections. It is already enforced when the setting changes,
@@ -238,11 +241,36 @@ export class LobbyController {
     this.activeBeatmapId = mapId; this.startedAt = new Date(); this.votes.clear(); this.reapplyTitle(); this.reapplyPassword();
   }
   private stopTimer() { if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
-  private async finish(scores: Array<{ player: Participant; score: number; team?: "red" | "blue" }>) { if (!this.matchId) return; const ordered = [...scores].sort((a, b) => b.score - a.score); const ratedMatch = ordered.length > 1; const avg = ratedMatch ? (await this.db.player.findMany({ where: { id: { in: ordered.map(x => x.player.id) } } })).reduce((s, p, _, a) => s + p.elo / a.length, 0) : 0; for (const [i, s] of ordered.entries()) { const winner = this.teamEvent ? s.team === ordered[0].team : i === 0; const player = ratedMatch ? await this.db.player.findUniqueOrThrow({ where: { id: s.player.id } }) : undefined; await this.db.$transaction([this.db.score.create({ data: { matchId: this.matchId, playerId: s.player.id, score: s.score, placement: i + 1, team: s.team, winner } }), ...(ratedMatch ? [this.db.player.update({ where: { id: s.player.id }, data: { elo: newRating(player!.elo, avg, winner ? 1 : 0), matches: { increment: 1 }, wins: { increment: winner ? 1 : 0 }, streak: winner ? { increment: 1 } : 0, longestStreak: winner ? Math.max(player!.longestStreak, player!.streak + 1) : player!.longestStreak } })] : [])]); }
+  private async finish(scores: Array<{ player: Participant; score: number; team?: "red" | "blue" }>) {
+    if (!this.matchId) return;
+    const matchId = this.matchId; const ordered = [...scores].sort((a, b) => b.score - a.score);
+    const resultByPlayer = new Map(ordered.map(result => [result.player.id, result]));
+    const participantById = new Map(this.matchParticipants.map(player => [player.id, player]));
+    for (const result of ordered) participantById.set(result.player.id, result.player);
+    const participants = [...participantById.values()];
+    const savedPlayers = await this.db.player.findMany({ where: { id: { in: participants.map(player => player.id) } } });
+    const savedById = new Map(savedPlayers.map(player => [player.id, player]));
+    const ratingInputs = participants.flatMap(player => {
+      const saved = savedById.get(player.id); if (!saved) return [];
+      const score = resultByPlayer.get(player.id)?.score;
+      return [{ playerId: player.id, currentElo: saved.elo, matchCount: saved.matches, score: score === undefined || score === null || score === -1 ? null : score }];
+    });
+    const ranked = !this.eventActive && ratingInputs.length > 1 ? fractionalElo(ratingInputs) : [];
+    const ratingByPlayer = new Map(ranked.map(result => [result.playerId, result]));
+    const highestCompletedScore = Math.max(...ratingInputs.map(result => result.score ?? -1));
+    for (const player of participants) {
+      const result = resultByPlayer.get(player.id); const rating = ratingByPlayer.get(player.id);
+      const score = result?.score ?? -1; const winner = Boolean(rating && score >= 0 && score === highestCompletedScore);
+      const saved = savedById.get(player.id);
+      await this.db.$transaction([
+        this.db.score.create({ data: { matchId, playerId: player.id, score, placement: rating ? Math.floor(rating.rank) : ordered.findIndex(entry => entry.player.id === player.id) + 1, team: result?.team, winner } }),
+        ...(rating && saved ? [this.db.player.update({ where: { id: player.id }, data: { elo: rating.newElo, matches: { increment: 1 }, wins: { increment: winner ? 1 : 0 }, streak: winner ? { increment: 1 } : 0, longestStreak: winner ? Math.max(saved.longestStreak, saved.streak + 1) : saved.longestStreak } })] : [])
+      ]);
+    }
     await this.db.match.update({ where: { id: this.matchId }, data: { endedAt: new Date() } });
-    const mapId = this.activeBeatmapId; const startedAt = this.startedAt; const participants = ordered.map(x => ({ ...x.player, matchScore: x.score }));
-    this.matchId = undefined; this.activeBeatmapId = undefined; this.startedAt = undefined;
-    if (mapId && startedAt) setTimeout(() => void this.announceLeaderboardScores(mapId, startedAt, participants), 10_000);
+    const mapId = this.activeBeatmapId; const startedAt = this.startedAt; const leaderboardParticipants = ordered.map(x => ({ ...x.player, matchScore: x.score }));
+    this.matchId = undefined; this.activeBeatmapId = undefined; this.startedAt = undefined; this.matchParticipants = [];
+    if (mapId && startedAt) setTimeout(() => void this.announceLeaderboardScores(mapId, startedAt, leaderboardParticipants), 10_000);
     if (this.eventActive) { await this.room.command(`!mp set ${this.config.teamMode} ${this.config.scoreMode}`); this.teamEvent = false; this.eventActive = false; } await this.skip(); }
   private async announceLeaderboardScores(mapId: number, startedAt: Date, players: Array<Participant & { matchScore: number }>) {
     // Newly-submitted scores can take longer than a few seconds to appear in
@@ -273,13 +301,22 @@ export class LobbyController {
       if (attempt < 11) await new Promise(resolve => setTimeout(resolve, 10_000));
     }
   }
-  private async playtime(p: Participant) { const lp = await this.db.lobbyPlayer.findUnique({ where: { lobbyId_playerId: { lobbyId: this.lobbyId, playerId: p.id } }, include: { player: true } }); if (lp) await this.room.say(`${p.username}: session ${fmt(Math.floor((Date.now() - lp.sessionStart.getTime()) / 1000))}; total ${fmt(lp.player.playSeconds)}.`); }
+  private async playtime(p: Participant) { const lp = await this.db.lobbyPlayer.findUnique({ where: { lobbyId_playerId: { lobbyId: this.lobbyId, playerId: p.id } } }); if (lp) await this.room.say(`${p.username}: session ${fmtSession(Math.floor((Date.now() - lp.sessionStart.getTime()) / 1000))}.`); }
   private async timeleft() { if (!this.startedAt || !this.room.beatmapId()) return void this.room.say("No active match."); const map = await this.osu.beatmap(this.room.beatmapId()!); await this.room.say(`About ${fmt(Math.max(0, map.length - Math.floor((Date.now() - this.startedAt.getTime()) / 1000)))} left.`); }
-  private async stats(p: Participant) { const x = await this.db.player.findUnique({ where: { id: p.id } }); if (x) await this.room.say(`${x.username}: ELO ${x.elo}, LWS ${x.longestStreak}, matches ${x.matches}, win rate ${winRate(x)}%.`); }
+  private async stats(p: Participant, username?: string) {
+    const player = username
+      ? (await this.db.player.findMany({ where: { username: { contains: username } }, take: 10 })).find(candidate => candidate.username.toLowerCase() === username.toLowerCase())
+      : await this.db.player.findUnique({ where: { id: p.id } });
+    if (!player) return void this.room.say(`${username ?? p.username}: no local stats found.`);
+    await this.room.say(`${player.username}: ELO ${player.elo}, LWS ${player.longestStreak}, matches ${player.matches}, win rate ${winRate(player)}%.`);
+  }
   private async top() { const x = await this.db.player.findMany({ where: { matches: { gt: 0 } }, orderBy: [{ elo: "desc" }, { id: "asc" }], take: 10 }); await this.room.say(x.length ? `Top: ${x.map((p, i) => `#${i + 1} ${p.username} (${p.elo})`).join(" | ")}` : "No completed matches have been recorded yet."); }
-  private async rank(p: Participant) {
-    const player = await this.db.player.findUnique({ where: { id: p.id } });
-    if (!player || player.matches === 0) return void this.room.say(`${p.username}: complete a match to receive a local ranking.`);
+  private async rank(p: Participant, username?: string) {
+    const player = username
+      ? (await this.db.player.findMany({ where: { username: { contains: username } }, take: 10 })).find(candidate => candidate.username.toLowerCase() === username.toLowerCase())
+      : await this.db.player.findUnique({ where: { id: p.id } });
+    if (!player) return void this.room.say(`${username ?? p.username}: no local ranking found.`);
+    if (player.matches === 0) return void this.room.say(`${player.username}: complete a match to receive a local ranking.`);
     const eligible = { matches: { gt: 0 } };
     const ahead = await this.db.player.count({ where: { AND: [eligible, { OR: [{ elo: { gt: player.elo } }, { elo: player.elo, id: { lt: player.id } }] }] } });
     const total = await this.db.player.count({ where: eligible });
