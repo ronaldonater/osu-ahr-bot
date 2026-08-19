@@ -30,9 +30,17 @@ export class OsuApi {
     if (!response.ok) throw new Error("osu! user lookup failed"); return response.json() as Promise<any>;
   }
   async userBeatmapBestScore(beatmapId: number, userId: number) {
-    const response = await fetch(`https://osu.ppy.sh/api/v2/beatmaps/${beatmapId}/scores/users/${userId}?legacy_only=0`, { headers: { Authorization: `Bearer ${await this.accessToken()}` } });
+    const response = await fetch(`https://osu.ppy.sh/api/v2/beatmaps/${beatmapId}/scores/users/${userId}?legacy_only=1`, { headers: { Authorization: `Bearer ${await this.accessToken()}` } });
     if (response.status === 404) return undefined;
     if (!response.ok) throw new Error(`osu! score lookup failed (${response.status})`);
-    return response.json() as Promise<{ position?: number; score: { score?: number; total_score?: number; legacy_total_score?: number; accuracy?: number; pp?: number; created_at?: string; mods?: Array<string | { acronym?: string }> } }>;
+    return response.json() as Promise<{ position?: number; score: { id?: number; score?: number; total_score?: number; legacy_total_score?: number; accuracy?: number; pp?: number | null; created_at?: string; mods?: Array<string | { acronym?: string }> } }>;
+  }
+  async leaderboardPosition(beatmapId: number, scoreId?: number) {
+    if (!scoreId) return undefined;
+    const response = await fetch(`https://osu.ppy.sh/api/v2/beatmaps/${beatmapId}/scores?legacy_only=1`, { headers: { Authorization: `Bearer ${await this.accessToken()}` } });
+    if (!response.ok) throw new Error(`osu! leaderboard lookup failed (${response.status})`);
+    const leaderboard = await response.json() as { scores?: Array<{ id?: number }> };
+    const index = (leaderboard.scores ?? []).findIndex(score => score.id === scoreId);
+    return index === -1 ? undefined : index + 1;
   }
 }

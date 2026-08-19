@@ -21,6 +21,7 @@ model Player {
   updatedAt   DateTime  @updatedAt
   scores      Score[]
   lobbyPlayers LobbyPlayer[]
+  modeStats   PlayerModeStats[]
 }
 
 model Lobby {
@@ -50,10 +51,27 @@ model Match {
   lobbyId     Int
   beatmapId   Int?
   teamEvent   Boolean   @default(false)
+  gameMode    String    @default("osu")
   startedAt   DateTime?
   endedAt     DateTime?
   lobby       Lobby     @relation(fields: [lobbyId], references: [id], onDelete: Cascade)
   scores      Score[]
+}
+
+model PlayerModeStats {
+  playerId      Int
+  mode          String
+  elo           Int       @default(1000)
+  matches       Int       @default(0)
+  wins          Int       @default(0)
+  streak        Int       @default(0)
+  longestStreak Int       @default(0)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  player        Player    @relation(fields: [playerId], references: [id], onDelete: Cascade)
+
+  @@id([playerId, mode])
+  @@index([mode, elo])
 }
 
 model Score {

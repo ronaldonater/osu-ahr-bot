@@ -1,4 +1,6 @@
 export type GameMode = "osu" | "taiko" | "fruits" | "mania";
+export const GAME_MODES: GameMode[] = ["osu", "taiko", "fruits", "mania"];
+export const gameModeLabel = (mode: GameMode) => ({ osu: "osu!standard", taiko: "osu!taiko", fruits: "osu!catch", mania: "osu!mania" })[mode];
 export type TeamMode = 0 | 1 | 2 | 3;
 export type ScoreMode = 0 | 1 | 2 | 3;
 

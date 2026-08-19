@@ -1,7 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import type { RoomActions } from "./adapters/bancho.js";
 import { OsuApiRequestError, type OsuApi } from "./adapters/osu.js";
-import { DEFAULT_CONFIG, type LobbyConfig, type Participant } from "./types.js";
+import { DEFAULT_CONFIG, gameModeLabel, type GameMode, type LobbyConfig, type Participant } from "./types.js";
 import { checkMap } from "./services/regulations.js";
 import { fractionalElo, winRate } from "./services/elo.js";
 import { balancedTeams } from "./services/teams.js";
@@ -12,8 +12,8 @@ const fmt = (s: number) => `${Math.floor(s / 60)}m ${s % 60}s`;
 const fmtSession = (s: number) => `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ${s % 60}s`;
 
 export class LobbyController {
-  private config: LobbyConfig; private queue: number[] = []; private votes = new VoteBook();
-  private timer?: NodeJS.Timeout; private startedAt?: Date; private matchId?: number; private activeBeatmapId?: number; private matchParticipants: Participant[] = []; private teamEvent = false; private eventActive = false; private lastValidMapId?: number; private passwordSetUntil = 0; private freeModSetUntil = 0;
+  private config: LobbyConfig; private queue: number[] = []; private autoSkip = new Set<number>(); private votes = new VoteBook();
+  private timer?: NodeJS.Timeout; private startedAt?: Date; private matchId?: number; private activeBeatmapId?: number; private matchGameMode?: GameMode; private selectedGameMode?: GameMode; private matchParticipants: Participant[] = []; private teamEvent = false; private eventActive = false; private lastValidMapId?: number; private passwordSetUntil = 0; private freeModSetUntil = 0;
   private turnTimer?: NodeJS.Timeout; private turnWarnings: NodeJS.Timeout[] = []; private turnHostId?: number; private turnMapId?: number; private turnStage?: "select" | "start";
   constructor(private db: PrismaClient, private lobbyId: number, private room: RoomActions, private osu: OsuApi, config: LobbyConfig = DEFAULT_CONFIG) { this.config = config; }
   async start() {
@@ -38,6 +38,7 @@ export class LobbyController {
   private async departed(player: Participant) {
     const wasQueued = this.queue.includes(player.id);
     this.queue = this.queue.filter(id => id !== player.id);
+    this.autoSkip.delete(player.id);
     const session = await this.db.lobbyPlayer.findUnique({ where: { lobbyId_playerId: { lobbyId: this.lobbyId, playerId: player.id } } });
     if (session) {
       const elapsedSeconds = Math.max(0, Math.floor((Date.now() - session.sessionStart.getTime()) / 1000));
@@ -48,7 +49,7 @@ export class LobbyController {
     }
     if (wasQueued) await this.room.say(`${player.username} left and was removed from the queue.`);
     // Bancho clears host state asynchronously after a host leaves.
-    setTimeout(() => void this.electHost(), 250);
+    setTimeout(() => { void this.disableSoloAutoSkip(); void this.electHost(); }, 250);
   }
   private async syncPlayers() {
     const players = this.room.players();
@@ -68,6 +69,16 @@ export class LobbyController {
   private hostChanged(host?: Participant) {
     if (!host || this.matchId || host.id === this.turnHostId) return;
     this.turnHostId = host.id;
+    if (this.autoSkip.has(host.id)) {
+      if (this.room.players().length <= 1) {
+        this.autoSkip.delete(host.id);
+        void this.room.say(`${host.username}: auto-skip disabled because this is now a one-player lobby.`);
+        this.startTurnTimer("select", host);
+        return;
+      }
+      void this.room.say(`${host.username}'s host turn was automatically skipped.`).then(() => this.skip());
+      return;
+    }
     this.startTurnTimer("select", host);
   }
   private clearTurnTimer() {
@@ -93,8 +104,8 @@ export class LobbyController {
   private async allPlayersReady() {
     if (!this.room.beatmapId() || this.matchId) return;
     this.clearTurnTimer();
-    await this.room.say("All players are ready. Starting automatically.");
-    await this.startMatch(0);
+    await this.room.say("All players are ready. Starting automatically in 5 seconds.");
+    await this.startMatch(5);
   }
   private mapSelected(mapId: number) {
     const host = this.room.host();
@@ -107,16 +118,18 @@ export class LobbyController {
     if (cmd.startsWith("*") && !admins.has(p.id)) return void this.room.say(`${p.username}: administrator permission required.`);
     if (cmd === "!queue") return void this.showQueue();
     if (cmd === "!cmds") return void this.room.say("Command list: https://ronaldonater.com/osu-ahr");
+    if (cmd === "!bug") return void this.room.say("Report a bug: https://github.com/ronaldonater/osu-ahr-bot/issues");
     if (["!regulations"].includes(cmd)) return void this.showRegulations();
-    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.6");
+    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.7");
     if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p);
     if (["!timeleft", "!tl"].includes(cmd)) return void this.timeleft();
-    if (["!ostats", "!os"].includes(cmd)) return void this.stats(p, value || undefined);
-    if (["!top", "!t"].includes(cmd)) return void this.top();
+    if (["!ostats", "!os"].includes(cmd)) { const { username, mode } = this.usernameAndMode(args); return void this.stats(p, username, mode); }
+    if (["!top", "!t"].includes(cmd)) return void this.top(args);
     if (["!how", "!h"].includes(cmd)) return void this.room.say("Ranked H2H uses fractional ELO: placement earns results, exact ties share rank, and disconnects tie last. K is 40 for 0–10 matches, 24 for 11–100, then 16. Results adjust against the lobby's average ELO. Random events are unranked.");
-    if (cmd === "!rank") return void this.rank(p, value || undefined);
+    if (cmd === "!rank") { const { username, mode } = this.usernameAndMode(args); return void this.rank(p, username, mode); }
     if (["!lastscore", "!ls"].includes(cmd)) return void this.lastScore();
     if (["!bestscore", "!bs"].includes(cmd)) return void this.bestScore(p);
+    if (cmd === "!autoskip") return void this.setAutoSkip(p, args[0]);
     if (cmd === "!update") return void (this.isHost(p) ? this.updateMap() : this.room.say(`${p.username}: only the current host can use !update.`));
     if (cmd === "!skip") return void (this.isHost(p) ? this.skip() : this.vote("skip", p));
     if (cmd === "!start") return void (this.isHost(p) ? this.startMatch(Number(args[0] ?? 5)) : this.vote("start", p));
@@ -137,6 +150,25 @@ export class LobbyController {
   private async vote(kind: string, p: Participant) { const r = this.votes.cast(kind, p.id, this.room.players()); await this.room.say(`${kind}: ${r.count}/${r.required}`); if (r.passed) { this.votes.clear(); if (kind === "skip") await this.skip(); if (kind === "start") await this.startMatch(5); if (kind === "abort") await this.abortMatch(); } }
   private async abortMatch() { await this.room.command("!mp abort"); await this.room.say("Match aborted."); }
   private async showQueue() { const rows = await this.db.player.findMany({ where: { id: { in: this.queue } } }); await this.room.say(`Queue: ${this.queue.map((id, i) => `${i + 1}. ${rows.find(x => x.id === id)?.username ?? id}`).join(" | ") || "empty"}`); }
+  private async setAutoSkip(p: Participant, value?: string) {
+    const enabled = value?.toLowerCase();
+    if (enabled !== "on" && enabled !== "off") return void this.room.say("Usage: !autoskip [on/off].");
+    if (enabled === "on") {
+      if (this.room.players().length <= 1) return void this.room.say(`${p.username}: auto-skip cannot be enabled in a one-player lobby.`);
+      this.autoSkip.add(p.id);
+      await this.room.say(`${p.username}: auto-skip enabled. Your host turns will be passed automatically.`);
+      if (this.isHost(p) && !this.matchId) await this.skip();
+    } else {
+      this.autoSkip.delete(p.id);
+      await this.room.say(`${p.username}: auto-skip disabled.`);
+    }
+  }
+  private async disableSoloAutoSkip() {
+    const players = this.room.players();
+    if (players.length !== 1) return;
+    const player = players[0];
+    if (this.autoSkip.delete(player.id)) await this.room.say(`${player.username}: auto-skip disabled because this is now a one-player lobby.`);
+  }
   private async showRegulations() {
     await this.room.say(this.regulationSummary());
   }
@@ -157,8 +189,9 @@ export class LobbyController {
     // Wait for the subsequent real beatmap ID instead of showing an error to chat.
     if (!Number.isInteger(mapId) || mapId <= 0) return;
     try {
-      const reason = checkMap(await this.osu.beatmap(mapId), this.config.regulations);
-      if (!reason) { this.lastValidMapId = mapId; this.mapSelected(mapId); return; }
+      const map = await this.osu.beatmap(mapId);
+      const reason = checkMap(map, this.config.regulations);
+      if (!reason) { this.lastValidMapId = mapId; this.selectedGameMode = map.mode; this.mapSelected(mapId); return; }
       if (this.lastValidMapId) {
         await this.room.command(`!mp map ${this.lastValidMapId}`);
         await this.room.say(`Map rejected: ${reason}. Reverted to the previous valid map.`);
@@ -207,6 +240,7 @@ export class LobbyController {
     await this.room.say(`${blocked.join("/")} is not allowed as a lobby modifier. Restored permitted mods.`);
   }
   private async launch(mapId: number) {
+    const gameMode = (await this.osu.beatmap(mapId)).mode;
     this.eventActive = Math.random() < this.config.eventChance;
     this.teamEvent = false;
     if (this.eventActive) {
@@ -217,43 +251,60 @@ export class LobbyController {
         { teamMode: 0, scoreMode: 2, label: "Head-to-Head — Combo" },
         { teamMode: 0, scoreMode: 1, label: "Head-to-Head — Accuracy" }
       ];
-      const event = events[Math.floor(Math.random() * events.length)];
-      this.teamEvent = event.teamMode === 2;
+      const event = events[Math.floor(Math.random() * events.length)]; this.teamEvent = event.teamMode === 2;
       await this.room.command(`!mp set ${event.teamMode} ${event.scoreMode}`);
       if (this.teamEvent) {
-        const ids = this.room.players().map(p => p.id); const ps = await this.db.player.findMany({ where: { id: { in: ids } } }); const teams = balancedTeams(ps);
-        await this.room.command(`!mp team Red ${teams.red.map(x => x.username).join(",")}`);
-        await this.room.command(`!mp team Blue ${teams.blue.map(x => x.username).join(",")}`);
-        await this.room.say(`Random event: ${event.label} (unranked). Balanced teams assigned.`);
+        const ids = this.room.players().map(p => p.id);
+        const players = await this.db.player.findMany({ where: { id: { in: ids } } });
+        const modeStats = await this.db.playerModeStats.findMany({ where: { playerId: { in: ids }, mode: gameMode } });
+        const eloByPlayer = new Map(modeStats.map(stat => [stat.playerId, stat.elo]));
+        const teams = balancedTeams(players.map(player => ({ ...player, elo: eloByPlayer.get(player.id) ?? 1000 })));
+        await this.room.command(`!mp team Red ${teams.red.map(player => player.username).join(",")}`);
+        await this.room.command(`!mp team Blue ${teams.blue.map(player => player.username).join(",")}`);
+        await this.room.say(`Random event: ${event.label} (unranked). Balanced teams assigned based on ELO.`);
       } else await this.room.say(`Random event: ${event.label} (unranked).`);
     }
-    await this.beginMatch(mapId); await this.room.command("!mp start"); }
+    await this.beginMatch(mapId, gameMode); await this.room.command("!mp start"); }
   /** Covers bot-started games and games started directly by the current host. */
-  private async beginMatch(mapId = this.room.beatmapId()) {
+  private async beginMatch(mapId = this.room.beatmapId(), gameMode?: GameMode) {
     if (this.matchId) return;
     this.clearTurnTimer();
     // Keep a start-of-match roster so disconnects remain in the rating result.
     this.matchParticipants = this.room.players();
-    this.matchId = (await this.db.match.create({ data: { lobbyId: this.lobbyId, beatmapId: mapId, teamEvent: this.teamEvent, startedAt: new Date() } })).id;
+    this.matchGameMode = gameMode ?? this.selectedGameMode ?? this.config.regulations.gameMode ?? "osu";
+    this.matchId = (await this.db.match.create({ data: { lobbyId: this.lobbyId, beatmapId: mapId, gameMode: this.matchGameMode, teamEvent: this.teamEvent, startedAt: new Date() } })).id;
     // Reapplying Free Mod with `!mp mods 0 freemod` clears every player's
     // individual selections. It is already enforced when the setting changes,
     // so never send that command as a match is beginning.
     this.activeBeatmapId = mapId; this.startedAt = new Date(); this.votes.clear(); this.reapplyTitle(); this.reapplyPassword();
   }
   private stopTimer() { if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
+  private async announceEloChanges(changes: string[]) {
+    if (!changes.length) return;
+    let message = "ELO changes: ";
+    for (const change of changes) {
+      const next = message === "ELO changes: " ? `${message}${change}` : `${message} | ${change}`;
+      if (next.length > 400 && message !== "ELO changes: ") {
+        await this.room.say(message);
+        message = `ELO changes: ${change}`;
+      } else message = next;
+    }
+    await this.room.say(message);
+  }
   private async finish(scores: Array<{ player: Participant; score: number; team?: "red" | "blue" }>) {
     if (!this.matchId) return;
     const matchId = this.matchId; const ordered = [...scores].sort((a, b) => b.score - a.score);
+    const gameMode = this.matchGameMode ?? this.selectedGameMode ?? this.config.regulations.gameMode ?? "osu";
     const resultByPlayer = new Map(ordered.map(result => [result.player.id, result]));
     const participantById = new Map(this.matchParticipants.map(player => [player.id, player]));
     for (const result of ordered) participantById.set(result.player.id, result.player);
     const participants = [...participantById.values()];
-    const savedPlayers = await this.db.player.findMany({ where: { id: { in: participants.map(player => player.id) } } });
-    const savedById = new Map(savedPlayers.map(player => [player.id, player]));
+    const savedStats = await this.db.playerModeStats.findMany({ where: { playerId: { in: participants.map(player => player.id) }, mode: gameMode } });
+    const statsByPlayer = new Map(savedStats.map(stat => [stat.playerId, stat]));
     const ratingInputs = participants.flatMap(player => {
-      const saved = savedById.get(player.id); if (!saved) return [];
       const score = resultByPlayer.get(player.id)?.score;
-      return [{ playerId: player.id, currentElo: saved.elo, matchCount: saved.matches, score: score === undefined || score === null || score === -1 ? null : score }];
+      const stats = statsByPlayer.get(player.id);
+      return [{ playerId: player.id, currentElo: stats?.elo ?? 1000, matchCount: stats?.matches ?? 0, score: score === undefined || score === null || score === -1 ? null : score }];
     });
     const ranked = !this.eventActive && ratingInputs.length > 1 ? fractionalElo(ratingInputs) : [];
     const ratingByPlayer = new Map(ranked.map(result => [result.playerId, result]));
@@ -261,17 +312,25 @@ export class LobbyController {
     for (const player of participants) {
       const result = resultByPlayer.get(player.id); const rating = ratingByPlayer.get(player.id);
       const score = result?.score ?? -1; const winner = Boolean(rating && score >= 0 && score === highestCompletedScore);
-      const saved = savedById.get(player.id);
+      const saved = statsByPlayer.get(player.id);
       await this.db.$transaction([
         this.db.score.create({ data: { matchId, playerId: player.id, score, placement: rating ? Math.floor(rating.rank) : ordered.findIndex(entry => entry.player.id === player.id) + 1, team: result?.team, winner } }),
-        ...(rating && saved ? [this.db.player.update({ where: { id: player.id }, data: { elo: rating.newElo, matches: { increment: 1 }, wins: { increment: winner ? 1 : 0 }, streak: winner ? { increment: 1 } : 0, longestStreak: winner ? Math.max(saved.longestStreak, saved.streak + 1) : saved.longestStreak } })] : [])
+        ...(rating ? [this.db.playerModeStats.upsert({ where: { playerId_mode: { playerId: player.id, mode: gameMode } }, create: { playerId: player.id, mode: gameMode, elo: rating.newElo, matches: 1, wins: winner ? 1 : 0, streak: winner ? 1 : 0, longestStreak: winner ? 1 : 0 }, update: { elo: rating.newElo, matches: { increment: 1 }, wins: { increment: winner ? 1 : 0 }, streak: winner ? { increment: 1 } : 0, longestStreak: winner ? Math.max(saved?.longestStreak ?? 0, (saved?.streak ?? 0) + 1) : saved?.longestStreak ?? 0 } })] : [])
       ]);
     }
+    if (ranked.length) {
+      await this.announceEloChanges(participants.flatMap(player => {
+        const rating = ratingByPlayer.get(player.id);
+        return rating ? [`${gameModeLabel(gameMode)} — ${player.username} ${rating.eloChange >= 0 ? "+" : ""}${rating.eloChange} (${rating.newElo})`] : [];
+      }));
+    } else if (this.eventActive) await this.room.say("This random event was unranked; no ELO changes were applied.");
+    else if (ratingInputs.length === 1) await this.room.say("No ELO changes were applied: at least two players are required for a ranked match.");
     await this.db.match.update({ where: { id: this.matchId }, data: { endedAt: new Date() } });
     const mapId = this.activeBeatmapId; const startedAt = this.startedAt; const leaderboardParticipants = ordered.map(x => ({ ...x.player, matchScore: x.score }));
-    this.matchId = undefined; this.activeBeatmapId = undefined; this.startedAt = undefined; this.matchParticipants = [];
+    this.matchId = undefined; this.activeBeatmapId = undefined; this.matchGameMode = undefined; this.startedAt = undefined; this.matchParticipants = [];
     if (mapId && startedAt) setTimeout(() => void this.announceLeaderboardScores(mapId, startedAt, leaderboardParticipants), 10_000);
-    if (this.eventActive) { await this.room.command(`!mp set ${this.config.teamMode} ${this.config.scoreMode}`); this.teamEvent = false; this.eventActive = false; } await this.skip(); }
+    if (this.eventActive) { await this.room.command(`!mp set ${this.config.teamMode} ${this.config.scoreMode}`); this.teamEvent = false; this.eventActive = false; }
+    await this.skip(); }
   private async announceLeaderboardScores(mapId: number, startedAt: Date, players: Array<Participant & { matchScore: number }>) {
     // Newly-submitted scores can take longer than a few seconds to appear in
     // the public API. Retry for two minutes, while still requiring this exact
@@ -283,8 +342,9 @@ export class LobbyController {
       try {
         const result = await this.osu.userBeatmapBestScore(mapId, player.id);
         const recordedAt = result?.score.created_at ? Date.parse(result.score.created_at) : NaN;
+        const globalPosition = result ? await this.osu.leaderboardPosition(mapId, result.score.id) : undefined;
         // Ignore a player's existing leaderboard score: it must have been set in this match.
-        if (!result?.position || result.position > 50 || !Number.isFinite(recordedAt) || recordedAt < startedAt.getTime() - 120_000) {
+        if (!result || !globalPosition || globalPosition > 50 || !Number.isFinite(recordedAt) || recordedAt < startedAt.getTime() - 120_000) {
           if (attempt < 11) await new Promise(resolve => setTimeout(resolve, 10_000));
           continue;
         }
@@ -294,8 +354,8 @@ export class LobbyController {
           continue;
         }
         const mods = (score.mods ?? []).map(m => typeof m === "string" ? m : m.acronym ?? "").filter(Boolean).join("") || "NM";
-        const pp = score.pp === undefined ? "" : ` (${score.pp.toFixed(2)}pp)`;
-        await this.room.say(`Congratulations ${player.username}! Your ${points.toLocaleString()} +${mods}${pp} score is now global #${result.position} on this map!`);
+        const pp = score.pp == null ? "" : ` (${score.pp.toFixed(2)}pp)`;
+        await this.room.say(`Congratulations ${player.username}! Your ${points.toLocaleString()} +${mods}${pp} score is now global #${globalPosition} on this map!`);
         return;
       } catch { /* A delayed leaderboard lookup should never disrupt lobby rotation. */ }
       if (attempt < 11) await new Promise(resolve => setTimeout(resolve, 10_000));
@@ -303,28 +363,54 @@ export class LobbyController {
   }
   private async playtime(p: Participant) { const lp = await this.db.lobbyPlayer.findUnique({ where: { lobbyId_playerId: { lobbyId: this.lobbyId, playerId: p.id } } }); if (lp) await this.room.say(`${p.username}: session ${fmtSession(Math.floor((Date.now() - lp.sessionStart.getTime()) / 1000))}.`); }
   private async timeleft() { if (!this.startedAt || !this.room.beatmapId()) return void this.room.say("No active match."); const map = await this.osu.beatmap(this.room.beatmapId()!); await this.room.say(`About ${fmt(Math.max(0, map.length - Math.floor((Date.now() - this.startedAt.getTime()) / 1000)))} left.`); }
-  private async stats(p: Participant, username?: string) {
+  private currentStatsMode() { return this.selectedGameMode ?? this.config.regulations.gameMode ?? "osu"; }
+  private parseGameMode(value?: string): GameMode | undefined {
+    const aliases: Record<string, GameMode> = { osu: "osu", std: "osu", standard: "osu", taiko: "taiko", fruits: "fruits", catch: "fruits", ctb: "fruits", mania: "mania" };
+    return value ? aliases[value.toLowerCase()] : undefined;
+  }
+  private usernameAndMode(args: string[]) {
+    const mode = this.parseGameMode(args.at(-1));
+    const username = (mode ? args.slice(0, -1) : args).join(" ").trim() || undefined;
+    return { username, mode };
+  }
+  private async stats(p: Participant, username?: string, requestedMode?: GameMode) {
     const player = username
       ? (await this.db.player.findMany({ where: { username: { contains: username } }, take: 10 })).find(candidate => candidate.username.toLowerCase() === username.toLowerCase())
       : await this.db.player.findUnique({ where: { id: p.id } });
     if (!player) return void this.room.say(`${username ?? p.username}: no local stats found.`);
-    await this.room.say(`${player.username}: ELO ${player.elo}, LWS ${player.longestStreak}, matches ${player.matches}, win rate ${winRate(player)}%.`);
+    const mode = requestedMode ?? this.currentStatsMode();
+    const stats = await this.db.playerModeStats.findUnique({ where: { playerId_mode: { playerId: player.id, mode } } });
+    if (!stats) return void this.room.say(`${player.username}: no ${gameModeLabel(mode)} local stats found yet.`);
+    await this.room.say(`${player.username} (${gameModeLabel(mode)}): ELO ${stats.elo}, LWS ${stats.longestStreak}, matches ${stats.matches}, win rate ${winRate(stats)}%.`);
   }
-  private async top() { const x = await this.db.player.findMany({ where: { matches: { gte: 3 } }, orderBy: [{ elo: "desc" }, { id: "asc" }], take: 10 }); await this.room.say(x.length ? `Top: ${x.map((p, i) => `#${i + 1} ${p.username} (${p.elo})`).join(" | ")}` : "No players have completed the 3 matches required for local rankings yet."); }
-  private async rank(p: Participant, username?: string) {
+  private async top(args: string[]) {
+    const local = args.some(arg => arg.toLowerCase() === "local");
+    const modeArgs = args.filter(arg => arg.toLowerCase() !== "local");
+    if (modeArgs.length > 1 || modeArgs.length === 1 && !this.parseGameMode(modeArgs[0])) return void this.room.say("Usage: !top [local] [osu|taiko|catch|mania].");
+    const playerIds = this.room.players().map(player => player.id);
+    const mode = this.parseGameMode(modeArgs[0]) ?? this.currentStatsMode();
+    const players = await this.db.playerModeStats.findMany({ where: { mode, matches: { gte: 3 }, ...(local ? { playerId: { in: playerIds } } : {}) }, include: { player: true }, orderBy: [{ elo: "desc" }, { playerId: "asc" }], take: 10 });
+    if (!players.length) return void this.room.say(local ? `No current lobby players have completed the 3 ${gameModeLabel(mode)} matches required for local rankings yet.` : `No players have completed the 3 ${gameModeLabel(mode)} matches required for local rankings yet.`);
+    await this.room.say(`${local ? "Local top" : "Top"} (${gameModeLabel(mode)}): ${players.map((player, index) => `#${index + 1} ${player.player.username} (${player.elo})`).join(" | ")}`);
+  }
+  private async rank(p: Participant, username?: string, requestedMode?: GameMode) {
     const player = username
       ? (await this.db.player.findMany({ where: { username: { contains: username } }, take: 10 })).find(candidate => candidate.username.toLowerCase() === username.toLowerCase())
       : await this.db.player.findUnique({ where: { id: p.id } });
     if (!player) return void this.room.say(`${username ?? p.username}: no local ranking found.`);
-    if (player.matches < 3) return void this.room.say(`${player.username}: complete at least 3 matches to receive a local ranking.`);
-    const eligible = { matches: { gte: 3 } };
-    const ahead = await this.db.player.count({ where: { AND: [eligible, { OR: [{ elo: { gt: player.elo } }, { elo: player.elo, id: { lt: player.id } }] }] } });
-    const total = await this.db.player.count({ where: eligible });
-    await this.room.say(`${player.username}: AHR rank #${ahead + 1} of ${total} (ELO ${player.elo}).`);
+    const mode = requestedMode ?? this.currentStatsMode();
+    const stats = await this.db.playerModeStats.findUnique({ where: { playerId_mode: { playerId: player.id, mode } } });
+    if (!stats || stats.matches < 3) return void this.room.say(`${player.username}: complete at least 3 ${gameModeLabel(mode)} matches to receive a local ranking.`);
+    const eligible = { mode, matches: { gte: 3 } };
+    const ahead = await this.db.playerModeStats.count({ where: { AND: [eligible, { OR: [{ elo: { gt: stats.elo } }, { elo: stats.elo, playerId: { lt: player.id } }] }] } });
+    const total = await this.db.playerModeStats.count({ where: eligible });
+    await this.room.say(`${player.username}: ${gameModeLabel(mode)} AHR rank #${ahead + 1} of ${total} (ELO ${stats.elo}).`);
   }
   private async lastScore() { const m = await this.db.match.findFirst({ where: { lobbyId: this.lobbyId, endedAt: { not: null } }, orderBy: { endedAt: "desc" }, include: { scores: { include: { player: true }, orderBy: { placement: "asc" } } } }); await this.room.say(m ? `Last: ${m.scores.map(s => `${s.placement}. ${s.player.username} ${s.score}`).join(" | ")}` : "No completed match."); }
   private async bestScore(p: Participant) {
     const id = this.room.beatmapId(); if (!id) return void this.room.say("Select a beatmap first.");
+    const map = await this.osu.beatmap(id);
+    if (["wip", "pending", "graveyard"].includes(map.status)) return void this.room.say(`!bestscore is unavailable: ${map.status} maps do not have global leaderboards.`);
     const result = await this.osu.userBeatmapBestScore(id, p.id);
     if (!result) return void this.room.say(`${p.username}: no submitted global score on this beatmap.`);
     const score = result.score;
@@ -332,15 +418,16 @@ export class LobbyController {
     // Some API responses include one of those as 0, so prefer the first non-zero value.
     const points = score.legacy_total_score || score.total_score || score.score || 0;
     const accuracy = score.accuracy === undefined ? "" : `, ${(score.accuracy * 100).toFixed(2)}%`;
-    const pp = score.pp === undefined ? "" : `, ${score.pp.toFixed(2)}pp`;
+    const pp = score.pp == null ? "" : `, ${score.pp.toFixed(2)}pp`;
     const modAcronyms = (score.mods ?? []).map(m => typeof m === "string" ? m : m.acronym ?? "").filter(Boolean);
     const mods = modAcronyms.length ? ` +${modAcronyms.join("")}` : " +NM";
-    await this.room.say(`${p.username}: global best ${points.toLocaleString()}${accuracy}${pp}${mods}${result.position ? ` (global #${result.position})` : ""}.`);
+    const globalPosition = await this.osu.leaderboardPosition(id, score.id);
+    await this.room.say(`${p.username}: global best ${points.toLocaleString()}${accuracy}${pp}${mods}${globalPosition ? ` (global #${globalPosition})` : ""}.`);
   }
   private async order(value: string) { const names = value.split(",").map(x => x.trim().toLowerCase()); const players = await this.db.player.findMany({ where: { id: { in: this.queue } } }); this.queue = names.map(n => players.find(p => p.username.toLowerCase() === n)?.id).filter((x): x is number => x !== undefined); await this.showQueue(); }
   private async resetElo(confirmation?: string) {
     if (confirmation?.toLowerCase() !== "confirm") return void this.room.say("This resets every player's competitive stats. Use *resetelo confirm to proceed.");
-    const result = await this.db.player.updateMany({ data: { elo: 1000, matches: 0, wins: 0, streak: 0, longestStreak: 0 } });
+    const result = await this.db.playerModeStats.updateMany({ data: { elo: 1000, matches: 0, wins: 0, streak: 0, longestStreak: 0 } });
     await this.room.say(`ELO rankings reset for ${result.count} player${result.count === 1 ? "" : "s"}.`);
   }
   private async closeLobby() {
