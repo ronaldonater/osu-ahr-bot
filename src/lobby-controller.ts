@@ -120,7 +120,7 @@ export class LobbyController {
     if (cmd === "!cmds") return void this.room.say("Command list: https://ronaldonater.com/osu-ahr");
     if (cmd === "!bug") return void this.room.say("Report a bug: https://github.com/ronaldonater/osu-ahr-bot/issues");
     if (["!regulations"].includes(cmd)) return void this.showRegulations();
-    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.7");
+    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.8");
     if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p);
     if (["!timeleft", "!tl"].includes(cmd)) return void this.timeleft();
     if (["!ostats", "!os"].includes(cmd)) { const { username, mode } = this.usernameAndMode(args); return void this.stats(p, username, mode); }
@@ -128,7 +128,7 @@ export class LobbyController {
     if (["!how", "!h"].includes(cmd)) return void this.room.say("Ranked H2H uses fractional ELO: placement earns results, exact ties share rank, and disconnects tie last. K is 40 for 0–10 matches, 24 for 11–100, then 16. Results adjust against the lobby's average ELO. Random events are unranked.");
     if (cmd === "!rank") { const { username, mode } = this.usernameAndMode(args); return void this.rank(p, username, mode); }
     if (["!lastscore", "!ls"].includes(cmd)) return void this.lastScore();
-    if (["!bestscore", "!bs"].includes(cmd)) return void this.bestScore(p);
+    if (["!bestscore", "!bs"].includes(cmd)) return void this.bestScore(p, value || undefined);
     if (cmd === "!autoskip") return void this.setAutoSkip(p, args[0]);
     if (cmd === "!update") return void (this.isHost(p) ? this.updateMap() : this.room.say(`${p.username}: only the current host can use !update.`));
     if (cmd === "!skip") return void (this.isHost(p) ? this.skip() : this.vote("skip", p));
@@ -407,12 +407,20 @@ export class LobbyController {
     await this.room.say(`${player.username}: ${gameModeLabel(mode)} AHR rank #${ahead + 1} of ${total} (ELO ${stats.elo}).`);
   }
   private async lastScore() { const m = await this.db.match.findFirst({ where: { lobbyId: this.lobbyId, endedAt: { not: null } }, orderBy: { endedAt: "desc" }, include: { scores: { include: { player: true }, orderBy: { placement: "asc" } } } }); await this.room.say(m ? `Last: ${m.scores.map(s => `${s.placement}. ${s.player.username} ${s.score}`).join(" | ")}` : "No completed match."); }
-  private async bestScore(p: Participant) {
+  private async bestScore(p: Participant, username?: string) {
     const id = this.room.beatmapId(); if (!id) return void this.room.say("Select a beatmap first.");
     const map = await this.osu.beatmap(id);
     if (["wip", "pending", "graveyard"].includes(map.status)) return void this.room.say(`!bestscore is unavailable: ${map.status} maps do not have global leaderboards.`);
-    const result = await this.osu.userBeatmapBestScore(id, p.id);
-    if (!result) return void this.room.say(`${p.username}: no submitted global score on this beatmap.`);
+    let target = p;
+    if (username) {
+      try {
+        const user = await this.osu.user(username);
+        if (!Number.isInteger(user.id) || !user.username) return void this.room.say(`${username}: osu! user not found.`);
+        target = { id: user.id, username: user.username };
+      } catch { return void this.room.say(`${username}: osu! user not found.`); }
+    }
+    const result = await this.osu.userBeatmapBestScore(id, target.id);
+    if (!result) return void this.room.say(`${target.username}: no submitted global score on this beatmap.`);
     const score = result.score;
     // Lazer scores use total_score; classic scores normally use legacy_total_score.
     // Some API responses include one of those as 0, so prefer the first non-zero value.
@@ -422,7 +430,7 @@ export class LobbyController {
     const modAcronyms = (score.mods ?? []).map(m => typeof m === "string" ? m : m.acronym ?? "").filter(Boolean);
     const mods = modAcronyms.length ? ` +${modAcronyms.join("")}` : " +NM";
     const globalPosition = await this.osu.leaderboardPosition(id, score.id);
-    await this.room.say(`${p.username}: global best ${points.toLocaleString()}${accuracy}${pp}${mods}${globalPosition ? ` (global #${globalPosition})` : ""}.`);
+    await this.room.say(`${target.username}: global best ${points.toLocaleString()}${accuracy}${pp}${mods}${globalPosition ? ` (global #${globalPosition})` : ""}.`);
   }
   private async order(value: string) { const names = value.split(",").map(x => x.trim().toLowerCase()); const players = await this.db.player.findMany({ where: { id: { in: this.queue } } }); this.queue = names.map(n => players.find(p => p.username.toLowerCase() === n)?.id).filter((x): x is number => x !== undefined); await this.showQueue(); }
   private async resetElo(confirmation?: string) {
