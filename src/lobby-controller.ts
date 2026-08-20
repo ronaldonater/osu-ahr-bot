@@ -114,14 +114,14 @@ export class LobbyController {
   }
   private async handle(p: Participant, raw: string) {
     if (!raw.startsWith("!") && !raw.startsWith("*")) return;
-    await this.syncPlayers(); const [cmd, ...args] = raw.trim().split(/\s+/); const value = args.join(" ");
+    await this.syncPlayers(); const [rawCommand, ...args] = raw.trim().split(/\s+/); const cmd = rawCommand.toLowerCase(); const value = args.join(" ");
     if (cmd.startsWith("*") && !admins.has(p.id)) return void this.room.say(`${p.username}: administrator permission required.`);
     if (cmd === "!queue") return void this.showQueue();
     if (cmd === "!cmds") return void this.room.say("Command list: https://ronaldonater.com/osu-ahr");
     if (cmd === "!bug") return void this.room.say("Report a bug: https://github.com/ronaldonater/osu-ahr-bot/issues");
     if (["!regulations"].includes(cmd)) return void this.showRegulations();
-    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.8");
-    if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p);
+    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.9");
+    if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p, value || undefined);
     if (["!timeleft", "!tl"].includes(cmd)) return void this.timeleft();
     if (["!ostats", "!os"].includes(cmd)) { const { username, mode } = this.usernameAndMode(args); return void this.stats(p, username, mode); }
     if (["!top", "!t"].includes(cmd)) return void this.top(args);
@@ -279,14 +279,15 @@ export class LobbyController {
     this.activeBeatmapId = mapId; this.startedAt = new Date(); this.votes.clear(); this.reapplyTitle(); this.reapplyPassword();
   }
   private stopTimer() { if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
-  private async announceEloChanges(changes: string[]) {
+  private async announceEloChanges(mode: GameMode, changes: string[]) {
     if (!changes.length) return;
-    let message = "ELO changes: ";
+    const heading = `ELO changes (${gameModeLabel(mode)}): `;
+    let message = heading;
     for (const change of changes) {
-      const next = message === "ELO changes: " ? `${message}${change}` : `${message} | ${change}`;
-      if (next.length > 400 && message !== "ELO changes: ") {
+      const next = message === heading ? `${message}${change}` : `${message} | ${change}`;
+      if (next.length > 400 && message !== heading) {
         await this.room.say(message);
-        message = `ELO changes: ${change}`;
+        message = `${heading}${change}`;
       } else message = next;
     }
     await this.room.say(message);
@@ -319,9 +320,9 @@ export class LobbyController {
       ]);
     }
     if (ranked.length) {
-      await this.announceEloChanges(participants.flatMap(player => {
+      await this.announceEloChanges(gameMode, participants.flatMap(player => {
         const rating = ratingByPlayer.get(player.id);
-        return rating ? [`${gameModeLabel(gameMode)} — ${player.username} ${rating.eloChange >= 0 ? "+" : ""}${rating.eloChange} (${rating.newElo})`] : [];
+        return rating ? [`${player.username} ${rating.eloChange >= 0 ? "+" : ""}${rating.eloChange} (${rating.newElo})`] : [];
       }));
     } else if (this.eventActive) await this.room.say("This random event was unranked; no ELO changes were applied.");
     else if (ratingInputs.length === 1) await this.room.say("No ELO changes were applied: at least two players are required for a ranked match.");
@@ -361,7 +362,15 @@ export class LobbyController {
       if (attempt < 11) await new Promise(resolve => setTimeout(resolve, 10_000));
     }
   }
-  private async playtime(p: Participant) { const lp = await this.db.lobbyPlayer.findUnique({ where: { lobbyId_playerId: { lobbyId: this.lobbyId, playerId: p.id } } }); if (lp) await this.room.say(`${p.username}: session ${fmtSession(Math.floor((Date.now() - lp.sessionStart.getTime()) / 1000))}.`); }
+  private async playtime(p: Participant, username?: string) {
+    const player = username
+      ? (await this.db.player.findMany({ where: { username: { contains: username } }, take: 10 })).find(candidate => candidate.username.toLowerCase() === username.toLowerCase())
+      : await this.db.player.findUnique({ where: { id: p.id } });
+    if (!player) return void this.room.say(`${username ?? p.username}: no local player record found.`);
+    const session = await this.db.lobbyPlayer.findUnique({ where: { lobbyId_playerId: { lobbyId: this.lobbyId, playerId: player.id } } });
+    if (!session) return void this.room.say(`${player.username}: no active session in this lobby.`);
+    await this.room.say(`${player.username}: session ${fmtSession(Math.floor((Date.now() - session.sessionStart.getTime()) / 1000))}.`);
+  }
   private async timeleft() { if (!this.startedAt || !this.room.beatmapId()) return void this.room.say("No active match."); const map = await this.osu.beatmap(this.room.beatmapId()!); await this.room.say(`About ${fmt(Math.max(0, map.length - Math.floor((Date.now() - this.startedAt.getTime()) / 1000)))} left.`); }
   private currentStatsMode() { return this.selectedGameMode ?? this.config.regulations.gameMode ?? "osu"; }
   private parseGameMode(value?: string): GameMode | undefined {

@@ -38,6 +38,35 @@ async function main() {
   const app = express(); app.use(express.json()); app.use(express.static("public"));
   app.use((req, res, next) => req.header("authorization") === `Bearer ${env.DASHBOARD_TOKEN}` ? next() : res.status(401).json({ error: "dashboard token required" }));
   app.get("/health", (_req, res) => res.json({ ok: true, lobbies: controllers.size }));
+  app.get("/players", async (req, res, next) => { try {
+    const query = z.object({ username: z.string().min(1).max(64), mode: z.enum(["osu", "taiko", "fruits", "mania"]).default("osu") }).parse(req.query);
+    const player = (await db.player.findMany({ where: { username: { contains: query.username } }, take: 10 })).find(candidate => candidate.username.toLowerCase() === query.username.toLowerCase());
+    if (!player) return res.status(404).json({ error: "No local player record found." });
+    const stats = await db.playerModeStats.findUnique({ where: { playerId_mode: { playerId: player.id, mode: query.mode } } });
+    const eligible = { mode: query.mode, matches: { gte: 3 } };
+    const rank = stats && stats.matches >= 3
+      ? (await db.playerModeStats.count({ where: { AND: [eligible, { OR: [{ elo: { gt: stats.elo } }, { elo: stats.elo, playerId: { lt: player.id } }] }] } })) + 1
+      : undefined;
+    const total = rank ? await db.playerModeStats.count({ where: eligible }) : undefined;
+    return res.json({ id: player.id, username: player.username, mode: query.mode, elo: stats?.elo ?? 1000, matches: stats?.matches ?? 0, wins: stats?.wins ?? 0, streak: stats?.streak ?? 0, longestStreak: stats?.longestStreak ?? 0, rank, total });
+  } catch (e) { next(e); } });
+  app.patch("/players/:id/stats", async (req, res, next) => { try {
+    const playerId = z.coerce.number().int().positive().parse(req.params.id);
+    const body = z.object({ mode: z.enum(["osu", "taiko", "fruits", "mania"]), elo: z.number().int().min(0), matches: z.number().int().min(0), wins: z.number().int().min(0), streak: z.number().int().min(0), longestStreak: z.number().int().min(0) }).parse(req.body);
+    if (body.wins > body.matches) return res.status(400).json({ error: "Wins cannot exceed matches." });
+    if (body.streak > body.longestStreak) return res.status(400).json({ error: "Current streak cannot exceed longest streak." });
+    const player = await db.player.findUnique({ where: { id: playerId } });
+    if (!player) return res.status(404).json({ error: "No local player record found." });
+    const values = { elo: body.elo, matches: body.matches, wins: body.wins, streak: body.streak, longestStreak: body.longestStreak };
+    const stats = await db.playerModeStats.upsert({ where: { playerId_mode: { playerId, mode: body.mode } }, create: { playerId, mode: body.mode, ...values }, update: values });
+    return res.json({ ok: true, stats });
+  } catch (e) { next(e); } });
+  app.get("/leaderboard", async (req, res, next) => { try {
+    const { mode, page } = z.object({ mode: z.enum(["osu", "taiko", "fruits", "mania"]).default("osu"), page: z.coerce.number().int().min(1).default(1) }).parse(req.query);
+    const where = { mode, matches: { gte: 3 } }; const perPage = 10; const total = await db.playerModeStats.count({ where }); const pageCount = Math.max(1, Math.ceil(total / perPage)); const currentPage = Math.min(page, pageCount);
+    const players = await db.playerModeStats.findMany({ where, include: { player: { select: { username: true } } }, orderBy: [{ elo: "desc" }, { playerId: "asc" }], skip: (currentPage - 1) * perPage, take: perPage });
+    return res.json({ mode, page: currentPage, total, pageCount, players: players.map((player, index) => ({ rank: (currentPage - 1) * perPage + index + 1, username: player.player.username, elo: player.elo, matches: player.matches, wins: player.wins, longestStreak: player.longestStreak })) });
+  } catch (e) { next(e); } });
   app.get("/lobbies", async (_req, res) => {
     const lobbies = await db.lobby.findMany({ select: { id: true, banchoId: true, name: true, config: true, createdAt: true }, orderBy: { createdAt: "desc" } });
     res.json(lobbies.map(lobby => ({ ...lobby, active: controllers.has(lobby.id) })));

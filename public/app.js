@@ -1,6 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
 const token = $('#token'); const notice = $('#notice'); const lobbies = $('#lobbies');
-const lobbiesPerPage = 8; let lobbyPage = 0;
+const lobbiesPerPage = 8; let lobbyPage = 0; let leaderboardPage = 1;
 token.value = localStorage.getItem('ahr-dashboard-token') || '';
 const headers = () => ({ Authorization: `Bearer ${token.value}`, 'Content-Type': 'application/json' });
 function message(text, error = false) { notice.textContent = text; notice.className = error ? 'error' : 'success'; }
@@ -29,7 +29,37 @@ function render(items) { $('#count').textContent = `${items.filter(x => x.active
 }
 function escapeHtml(value) { const el = document.createElement('span'); el.textContent = value; return el.innerHTML; }
 async function load() { try { render(await request('/lobbies')); } catch (e) { message(e.message, true); } }
+const modeName = mode => ({ osu: 'osu!standard', taiko: 'osu!taiko', fruits: 'osu!catch', mania: 'osu!mania' })[mode] || mode;
+function renderPlayerStats(player) {
+  const ranked = player.rank ? `#${player.rank} of ${player.total}` : 'Complete 3 matches to rank';
+  $('#player-stats').className = '';
+  $('#player-stats').innerHTML = `<h3>${escapeHtml(player.username)} <small>${modeName(player.mode)} · ${ranked}</small></h3><form id="player-stats-form" class="grid four" data-player-id="${player.id}" data-mode="${player.mode}"><label>ELO<input name="elo" type="number" min="0" step="1" value="${player.elo}" required></label><label>Matches<input name="matches" type="number" min="0" step="1" value="${player.matches}" required></label><label>Wins<input name="wins" type="number" min="0" step="1" value="${player.wins}" required></label><label>Current streak<input name="streak" type="number" min="0" step="1" value="${player.streak}" required></label><label>Longest streak<input name="longestStreak" type="number" min="0" step="1" value="${player.longestStreak}" required></label><button type="submit">Save stats</button></form>`;
+  $('#player-stats-form').addEventListener('submit', async event => {
+    event.preventDefault(); const form = event.currentTarget; const data = new FormData(form);
+    try {
+      await request(`/players/${form.dataset.playerId}/stats`, { method: 'PATCH', body: JSON.stringify({ mode: form.dataset.mode, elo: Number(data.get('elo')), matches: Number(data.get('matches')), wins: Number(data.get('wins')), streak: Number(data.get('streak')), longestStreak: Number(data.get('longestStreak')) }) });
+      message(`${player.username}'s ${modeName(player.mode)} stats were updated.`); await loadPlayer(); await loadLeaderboard();
+    } catch (e) { message(e.message, true); }
+  });
+}
+async function loadPlayer() {
+  const username = $('#player-username').value.trim(); const mode = $('#player-mode').value;
+  if (!username) return;
+  try { renderPlayerStats(await request(`/players?username=${encodeURIComponent(username)}&mode=${mode}`)); }
+  catch (e) { $('#player-stats').className = 'error'; $('#player-stats').textContent = e.message; }
+}
+function renderLeaderboard(data) {
+  const target = $('#leaderboard');
+  if (!data.players.length) { target.className = 'muted'; target.textContent = `No players have completed 3 ${modeName(data.mode)} matches yet.`; return; }
+  target.className = '';
+  target.innerHTML = `<table class="leaderboard-table"><thead><tr><th>Rank</th><th>Player</th><th>ELO</th><th>Matches</th><th>Wins</th></tr></thead><tbody>${data.players.map(player => `<tr><td>#${player.rank}</td><td>${escapeHtml(player.username)}</td><td>${player.elo}</td><td>${player.matches}</td><td>${player.wins}</td></tr>`).join('')}</tbody></table><nav class="pagination" aria-label="Leaderboard pages"><button class="secondary" data-leaderboard-page="previous" ${data.page === 1 ? 'disabled' : ''}>Previous</button><span>Page ${data.page} of ${data.pageCount}</span><button class="secondary" data-leaderboard-page="next" ${data.page === data.pageCount ? 'disabled' : ''}>Next</button></nav>`;
+  document.querySelectorAll('[data-leaderboard-page]').forEach(button => button.addEventListener('click', () => { leaderboardPage += button.dataset.leaderboardPage === 'next' ? 1 : -1; void loadLeaderboard(); }));
+}
+async function loadLeaderboard() { try { renderLeaderboard(await request(`/leaderboard?mode=${$('#leaderboard-mode').value}&page=${leaderboardPage}`)); } catch (e) { $('#leaderboard').className = 'error'; $('#leaderboard').textContent = e.message; } }
 $('#save-token').addEventListener('click', () => { localStorage.setItem('ahr-dashboard-token', token.value); message('Token saved locally in this browser.'); });
 $('#refresh').addEventListener('click', load);
+$('#player-form').addEventListener('submit', event => { event.preventDefault(); void loadPlayer(); });
+$('#load-leaderboard').addEventListener('click', loadLeaderboard);
+$('#leaderboard-mode').addEventListener('change', () => { leaderboardPage = 1; void loadLeaderboard(); });
 $('#create-form').addEventListener('submit', async event => { event.preventDefault(); const form = event.currentTarget; try { const lobby = await request('/lobbies', { method: 'POST', body: JSON.stringify(payload(form)) }); message(`Created ${lobby.name}.`); form.reset(); await load(); } catch (e) { message(e.message, true); } });
 if (token.value) load();

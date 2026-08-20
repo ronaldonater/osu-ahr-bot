@@ -21,6 +21,15 @@
       <button type="submit">Create lobby</button><p id="notice" role="status"></p>
     </form></section>
     <section class="card"><div class="section-heading"><h2>Lobbies</h2><span id="count"></span></div><div id="lobbies" class="lobbies"><p class="muted">Save your token, then refresh.</p></div></section>
+    <section class="card">
+      <h2>Player statistics</h2>
+      <form id="player-form" class="grid player-controls"><label>Username<input id="player-username" required maxlength="64" placeholder="osu! username"></label><label>Game mode<select id="player-mode"><option value="osu">osu!standard</option><option value="taiko">osu!taiko</option><option value="fruits">osu!catch</option><option value="mania">osu!mania</option></select></label><button type="submit">Look up player</button></form>
+      <div id="player-stats" class="muted">Enter a username to view their local competitive statistics.</div>
+    </section>
+    <section class="card">
+      <div class="section-heading"><h2>ELO leaderboard</h2><div class="leaderboard-controls"><select id="leaderboard-mode" aria-label="Leaderboard game mode"><option value="osu">osu!standard</option><option value="taiko">osu!taiko</option><option value="fruits">osu!catch</option><option value="mania">osu!mania</option></select><button id="load-leaderboard" class="secondary">Refresh</button></div></div>
+      <div id="leaderboard" class="muted">Choose a mode, then refresh the leaderboard.</div>
+    </section>
   </main><script src="/app.js"></script>
 </body>
 </html>

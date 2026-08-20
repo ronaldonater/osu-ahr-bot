@@ -34,3 +34,20 @@
   cursor: not-allowed;
   opacity: .45;
 }
+
+.player-controls { align-items: end; }
+.player-controls button { margin: 0; }
+.leaderboard-controls { display: flex; gap: 8px; align-items: center; }
+.leaderboard-controls select { width: auto; }
+.stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 16px; }
+.stat-grid div, .leaderboard-table { padding: 12px; border: 1px solid var(--edge); border-radius: 8px; background: #0e1528; }
+.stat-grid strong { display: block; font-size: 1.1rem; color: var(--text); }
+.leaderboard-table { width: 100%; border-collapse: separate; border-spacing: 0; overflow: hidden; margin-top: 16px; }
+.leaderboard-table th, .leaderboard-table td { padding: 10px; text-align: left; border-bottom: 1px solid var(--edge); }
+.leaderboard-table tr:last-child td { border-bottom: 0; }
+
+@media (max-width: 650px) {
+  .stat-grid { grid-template-columns: repeat(2, 1fr); }
+  .leaderboard-controls { width: 100%; justify-content: space-between; }
+  .section-heading { align-items: flex-start; gap: 12px; flex-direction: column; }
+}
