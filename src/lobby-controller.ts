@@ -14,7 +14,7 @@ const fmtSession = (s: number) => `${Math.floor(s / 3600)}h ${Math.floor((s % 36
 export class LobbyController {
   private config: LobbyConfig; private queue: number[] = []; private autoSkip = new Set<number>(); private votes = new VoteBook();
   private timer?: NodeJS.Timeout; private startedAt?: Date; private matchId?: number; private activeBeatmapId?: number; private matchGameMode?: GameMode; private selectedGameMode?: GameMode; private matchParticipants: Participant[] = []; private teamEvent = false; private eventActive = false; private lastValidMapId?: number; private passwordSetUntil = 0; private freeModSetUntil = 0;
-  private turnTimer?: NodeJS.Timeout; private turnWarnings: NodeJS.Timeout[] = []; private turnHostId?: number; private turnMapId?: number; private turnStage?: "select" | "start";
+  private turnTimer?: NodeJS.Timeout; private turnWarnings: NodeJS.Timeout[] = []; private turnHostId?: number; private turnMapId?: number; private turnStage?: "select" | "start"; private intendedHostId?: number;
   constructor(private db: PrismaClient, private lobbyId: number, private room: RoomActions, private osu: OsuApi, config: LobbyConfig = DEFAULT_CONFIG) { this.config = config; }
   async start() {
     this.room.onMessage((p, t) => void this.handle(p, t));
@@ -31,7 +31,7 @@ export class LobbyController {
     this.room.onMatchFinished(s => void this.finish(s));
     this.reapplyFreeMod();
     await this.joined();
-    this.hostChanged(this.room.host());
+    void this.hostChanged(this.room.host());
     if (this.room.beatmapId()) await this.validateSelection(this.room.beatmapId()!);
   }
   private async joined() { await this.syncPlayers(); await this.electHost(); }
@@ -62,12 +62,27 @@ export class LobbyController {
   private isHost(p: Participant) { return this.room.host()?.id === p.id; }
   private async electHost() {
     if (this.room.host() || !this.queue[0]) return;
+    this.intendedHostId = this.queue[0];
     await this.room.command(`!mp host #${this.queue[0]}`);
     this.reapplyTitle(); this.reapplyPassword(); this.reapplyFreeMod();
     await this.room.say(`Host assigned to the first queued player.`);
   }
-  private hostChanged(host?: Participant) {
-    if (!host || this.matchId || host.id === this.turnHostId) return;
+  private async hostChanged(host?: Participant) {
+    if (!host || this.matchId) return;
+    const expectedHostId = this.queue[0];
+    if (expectedHostId && host.id !== expectedHostId) {
+      // Ignore Bancho's delayed event for the prior host while our own rotation is pending.
+      if (this.intendedHostId === expectedHostId) return;
+      const expectedHost = this.room.players().find(player => player.id === expectedHostId);
+      if (!expectedHost) { this.queue = this.queue.filter(id => id !== expectedHostId); this.intendedHostId = undefined; return void this.electHost(); }
+      this.turnHostId = undefined; this.clearTurnTimer(); this.intendedHostId = expectedHostId;
+      await this.room.say(`Host rotation is queue-controlled. Passing host to ${expectedHost.username}; use !skip to rotate turns.`);
+      await this.room.command(`!mp host #${expectedHostId}`);
+      setTimeout(() => void this.hostChanged(this.room.host()), 500);
+      return;
+    }
+    this.intendedHostId = undefined;
+    if (host.id === this.turnHostId) return;
     this.turnHostId = host.id;
     if (this.autoSkip.has(host.id)) {
       if (this.room.players().length <= 1) {
@@ -120,7 +135,7 @@ export class LobbyController {
     if (cmd === "!cmds") return void this.room.say("Command list: https://ronaldonater.com/osu-ahr");
     if (cmd === "!bug") return void this.room.say("Report a bug: https://github.com/ronaldonater/osu-ahr-bot/issues");
     if (["!regulations"].includes(cmd)) return void this.showRegulations();
-    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.9");
+    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.10");
     if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p, value || undefined);
     if (["!timeleft", "!tl"].includes(cmd)) return void this.timeleft();
     if (["!ostats", "!os"].includes(cmd)) { const { username, mode } = this.usernameAndMode(args); return void this.stats(p, username, mode); }
@@ -131,6 +146,7 @@ export class LobbyController {
     if (["!bestscore", "!bs"].includes(cmd)) return void this.bestScore(p, value || undefined);
     if (cmd === "!autoskip") return void this.setAutoSkip(p, args[0]);
     if (cmd === "!update") return void (this.isHost(p) ? this.updateMap() : this.room.say(`${p.username}: only the current host can use !update.`));
+    if (cmd === "!votekick") return void this.voteKick(p, value);
     if (cmd === "!skip") return void (this.isHost(p) ? this.skip() : this.vote("skip", p));
     if (cmd === "!start") return void (this.isHost(p) ? this.startMatch(Number(args[0] ?? 5)) : this.vote("start", p));
     if (cmd === "!abort") return void this.vote("abort", p);
@@ -142,12 +158,26 @@ export class LobbyController {
     if (cmd === "*resetelo") return void this.resetElo(args[0]);
     if (cmd === "*close") return void this.closeLobby();
     if (cmd === "*eventchance") return void this.setEventChance(args[0]);
+    if (cmd === "*kick") return void this.kick(value);
     if (cmd === "*keep") return void this.keep(args);
     if (cmd === "*no" && args[0] === "keep") return void this.noKeep(args[1]);
     if (cmd === "*regulation" || cmd === "*no" && args[0] === "regulation") return void this.regulation(cmd === "*no" ? ["disable"] : args);
     if (cmd === "*denylist") return void this.denylist(args);
   }
   private async vote(kind: string, p: Participant) { const r = this.votes.cast(kind, p.id, this.room.players()); await this.room.say(`${kind}: ${r.count}/${r.required}`); if (r.passed) { this.votes.clear(); if (kind === "skip") await this.skip(); if (kind === "start") await this.startMatch(5); if (kind === "abort") await this.abortMatch(); } }
+  private async voteKick(voter: Participant, username: string) {
+    if (!username) return void this.room.say("Usage: !votekick [username].");
+    const target = this.room.players().find(player => player.username.toLowerCase() === username.toLowerCase());
+    if (!target) return void this.room.say(`${username}: not currently in this lobby.`);
+    if (target.id === voter.id) return void this.room.say("You cannot vote to kick yourself.");
+    const eligibleVoters = this.room.players().filter(player => player.id !== target.id);
+    const vote = this.votes.cast(`kick:${target.id}`, voter.id, eligibleVoters);
+    await this.room.say(`Votekick for ${target.username}: ${vote.count}/${vote.required}.`);
+    if (!vote.passed) return;
+    this.votes.clear();
+    await this.room.command(`!mp kick ${target.username}`);
+    await this.room.say(`${target.username} was removed by a player vote.`);
+  }
   private async abortMatch() { await this.room.command("!mp abort"); await this.room.say("Match aborted."); }
   private async showQueue() { const rows = await this.db.player.findMany({ where: { id: { in: this.queue } } }); await this.room.say(`Queue: ${this.queue.map((id, i) => `${i + 1}. ${rows.find(x => x.id === id)?.username ?? id}`).join(" | ") || "empty"}`); }
   private async setAutoSkip(p: Participant, value?: string) {
@@ -182,7 +212,7 @@ export class LobbyController {
     const range = (min: number | undefined, max: number | undefined, suffix = "") => min !== undefined || max !== undefined ? `${min ?? "any"}–${max ?? "any"}${suffix}` : "any";
     return `Map regulations — Stars: ${stars} | Length: ${length} | BPM: ${range(r.minBpm, r.maxBpm)} | AR: ${range(r.minAr, r.maxAr)} | HP: ${range(r.minHp, r.maxHp)} | OD: ${range(r.minOd, r.maxOd)} | CS: ${range(r.minCs, r.maxCs)} | Year: ${range(r.minLastUpdatedYear, r.maxLastUpdatedYear)} | Mode: ${mode} | Status: ${statuses} | Converts: ${r.allowConvert ? "allowed" : "not allowed"} | Free mod: ${r.freeMod ? "enabled" : "disabled"}.`;
   }
-  private async skip() { if (this.queue.length) this.queue.push(this.queue.shift()!); const next = this.queue[0]; this.turnHostId = undefined; if (next) await this.room.command(`!mp host #${next}`); this.reapplyTitle(); this.reapplyPassword(); this.reapplyFreeMod(); setTimeout(() => this.hostChanged(this.room.host()), 500); await this.showQueue(); }
+  private async skip() { if (this.queue.length) this.queue.push(this.queue.shift()!); const next = this.queue[0]; this.turnHostId = undefined; if (next) { this.intendedHostId = next; await this.room.command(`!mp host #${next}`); } this.reapplyTitle(); this.reapplyPassword(); this.reapplyFreeMod(); setTimeout(() => void this.hostChanged(this.room.host()), 500); await this.showQueue(); }
   private async startMatch(seconds: number) { if (!Number.isFinite(seconds) || seconds < 0 || seconds > 120) return void this.room.say("Start delay must be between 0 and 120 seconds."); const mapId = this.room.beatmapId(); if (!mapId) return void this.room.say("Select a beatmap first."); const reason = checkMap(await this.osu.beatmap(mapId), this.config.regulations); if (reason) return void this.room.say(`Map rejected: ${reason}.`); this.clearTurnTimer(); this.stopTimer(); this.timer = setTimeout(() => void this.launch(mapId), seconds * 1000); await this.room.say(`Match starts in ${seconds}s.`); }
   private async validateSelection(mapId: number) {
     // Bancho emits an intermediate empty/invalid map ID while a host changes maps.
@@ -446,6 +476,13 @@ export class LobbyController {
     if (confirmation?.toLowerCase() !== "confirm") return void this.room.say("This resets every player's competitive stats. Use *resetelo confirm to proceed.");
     const result = await this.db.playerModeStats.updateMany({ data: { elo: 1000, matches: 0, wins: 0, streak: 0, longestStreak: 0 } });
     await this.room.say(`ELO rankings reset for ${result.count} player${result.count === 1 ? "" : "s"}.`);
+  }
+  private async kick(username: string) {
+    if (!username) return void this.room.say("Usage: *kick [username].");
+    const player = this.room.players().find(candidate => candidate.username.toLowerCase() === username.toLowerCase());
+    if (!player) return void this.room.say(`${username}: not currently in this lobby.`);
+    await this.room.command(`!mp kick ${player.username}`);
+    await this.room.say(`${player.username} was removed from the lobby by an administrator.`);
   }
   private async closeLobby() {
     this.stopTimer(); this.clearTurnTimer();
