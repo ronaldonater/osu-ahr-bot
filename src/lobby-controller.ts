@@ -1,7 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import type { RoomActions } from "./adapters/bancho.js";
 import { OsuApiRequestError, type OsuApi } from "./adapters/osu.js";
-import { DEFAULT_CONFIG, gameModeLabel, type GameMode, type LobbyConfig, type Participant } from "./types.js";
+import { DEFAULT_CONFIG, gameModeLabel, type GameMode, type LobbyConfig, type MapInfo, type Participant } from "./types.js";
 import { checkMap } from "./services/regulations.js";
 import { fractionalElo, winRate } from "./services/elo.js";
 import { balancedTeams } from "./services/teams.js";
@@ -13,7 +13,7 @@ const fmtSession = (s: number) => `${Math.floor(s / 3600)}h ${Math.floor((s % 36
 
 export class LobbyController {
   private config: LobbyConfig; private queue: number[] = []; private autoSkip = new Set<number>(); private votes = new VoteBook();
-  private timer?: NodeJS.Timeout; private startedAt?: Date; private matchId?: number; private activeBeatmapId?: number; private matchGameMode?: GameMode; private selectedGameMode?: GameMode; private matchParticipants: Participant[] = []; private teamEvent = false; private eventActive = false; private lastValidMapId?: number; private passwordSetUntil = 0; private freeModSetUntil = 0;
+  private timer?: NodeJS.Timeout; private startedAt?: Date; private matchId?: number; private activeBeatmapId?: number; private matchGameMode?: GameMode; private selectedGameMode?: GameMode; private matchParticipants: Participant[] = []; private teamEvent = false; private eventActive = false; private lastValidMapId?: number; private lastAnnouncedMapId?: number; private passwordSetUntil = 0; private freeModSetUntil = 0;
   private turnTimer?: NodeJS.Timeout; private turnWarnings: NodeJS.Timeout[] = []; private turnHostId?: number; private turnMapId?: number; private turnStage?: "select" | "start"; private intendedHostId?: number;
   constructor(private db: PrismaClient, private lobbyId: number, private room: RoomActions, private osu: OsuApi, config: LobbyConfig = DEFAULT_CONFIG) { this.config = config; }
   async start() {
@@ -135,7 +135,7 @@ export class LobbyController {
     if (cmd === "!cmds") return void this.room.say("Command list: https://ronaldonater.com/osu-ahr");
     if (cmd === "!bug") return void this.room.say("Report a bug: https://github.com/ronaldonater/osu-ahr-bot/issues");
     if (["!regulations"].includes(cmd)) return void this.showRegulations();
-    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.10");
+    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.11");
     if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p, value || undefined);
     if (["!timeleft", "!tl"].includes(cmd)) return void this.timeleft();
     if (["!ostats", "!os"].includes(cmd)) { const { username, mode } = this.usernameAndMode(args); return void this.stats(p, username, mode); }
@@ -221,7 +221,7 @@ export class LobbyController {
     try {
       const map = await this.osu.beatmap(mapId);
       const reason = checkMap(map, this.config.regulations);
-      if (!reason) { this.lastValidMapId = mapId; this.selectedGameMode = map.mode; this.mapSelected(mapId); return; }
+      if (!reason) { this.lastValidMapId = mapId; this.selectedGameMode = map.mode; await this.announceSelectedMap(map); this.mapSelected(mapId); return; }
       if (this.lastValidMapId) {
         await this.room.command(`!mp map ${this.lastValidMapId}`);
         await this.room.say(`Map rejected: ${reason}. Reverted to the previous valid map.`);
@@ -321,6 +321,13 @@ export class LobbyController {
       } else message = next;
     }
     await this.room.say(message);
+  }
+  private async announceSelectedMap(map: MapInfo) {
+    if (this.matchId || this.lastAnnouncedMapId === map.id || !this.room.host()) return;
+    this.lastAnnouncedMapId = map.id;
+    const name = `${map.artist} - ${map.title} [${map.version}]`.slice(0, 140);
+    const mirrorLink = `https://beatconnect.io/b/${map.beatmapsetId}/`;
+    await this.room.say(`Selected map: ${name} | ${map.stars.toFixed(2)}★ | ${fmt(map.length)} | [${mirrorLink} Beatconnect Mirror]`);
   }
   private async finish(scores: Array<{ player: Participant; score: number; team?: "red" | "blue" }>) {
     if (!this.matchId) return;

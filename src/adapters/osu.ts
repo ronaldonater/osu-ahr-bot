@@ -20,7 +20,7 @@ export class OsuApi {
     if (!response.ok) throw new OsuApiRequestError(response.status, `osu! API beatmap request failed (${response.status})`);
     const b = await response.json() as any;
     return {
-      id: b.id, version: b.version, stars: b.difficulty_rating, length: b.total_length, mode: b.mode as GameMode,
+      id: b.id, beatmapsetId: b.beatmapset_id, title: b.beatmapset?.title ?? "Unknown title", artist: b.beatmapset?.artist ?? "Unknown artist", version: b.version, stars: b.difficulty_rating, length: b.total_length, mode: b.mode as GameMode,
       converted: Boolean(b.convert), status: String(b.status ?? "unknown").toLowerCase(), bpm: b.bpm, ar: b.ar,
       hp: b.drain, od: b.accuracy, cs: b.cs, lastUpdated: b.last_updated, rankedDate: b.beatmapset?.ranked_date
     };

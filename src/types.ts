@@ -21,7 +21,7 @@ export const DEFAULT_CONFIG: LobbyConfig = {
   regulations: { enabled: true, allowConvert: false, freeMod: true }, locks: {}
 };
 export interface MapInfo {
-  id: number; version: string; stars: number; length: number; mode: GameMode; converted: boolean; status: string;
+  id: number; beatmapsetId: number; title: string; artist: string; version: string; stars: number; length: number; mode: GameMode; converted: boolean; status: string;
   bpm: number; ar: number; hp: number; od: number; cs: number; lastUpdated?: string; rankedDate?: string;
 }
 export interface Participant { id: number; username: string; }
