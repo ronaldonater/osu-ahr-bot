@@ -135,7 +135,7 @@ export class LobbyController {
     if (cmd === "!cmds") return void this.room.say("Command list: https://ronaldonater.com/osu-ahr");
     if (cmd === "!bug") return void this.room.say("Report a bug: https://github.com/ronaldonater/osu-ahr-bot/issues");
     if (["!regulations"].includes(cmd)) return void this.showRegulations();
-    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.11");
+    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.12");
     if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p, value || undefined);
     if (["!timeleft", "!tl"].includes(cmd)) return void this.timeleft();
     if (["!ostats", "!os"].includes(cmd)) { const { username, mode } = this.usernameAndMode(args); return void this.stats(p, username, mode); }
@@ -289,8 +289,8 @@ export class LobbyController {
         const modeStats = await this.db.playerModeStats.findMany({ where: { playerId: { in: ids }, mode: gameMode } });
         const eloByPlayer = new Map(modeStats.map(stat => [stat.playerId, stat.elo]));
         const teams = balancedTeams(players.map(player => ({ ...player, elo: eloByPlayer.get(player.id) ?? 1000 })));
-        await this.room.command(`!mp team Red ${teams.red.map(player => player.username).join(",")}`);
-        await this.room.command(`!mp team Blue ${teams.blue.map(player => player.username).join(",")}`);
+        for (const player of teams.red) await this.room.command(`!mp team ${player.username} Red`);
+        for (const player of teams.blue) await this.room.command(`!mp team ${player.username} Blue`);
         await this.room.say(`Random event: ${event.label} (unranked). Balanced teams assigned based on ELO.`);
       } else await this.room.say(`Random event: ${event.label} (unranked).`);
     }

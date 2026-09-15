@@ -20,8 +20,30 @@ export interface RoomActions {
   onMatchStarted(listener: () => void): void;
   onMatchFinished(listener: (scores: Array<{ player: Participant; score: number; team?: "red" | "blue" }>) => void): void;
 }
+/** Shared across every lobby because Bancho's message cap applies to the bot account, not an individual room. */
+class BanchoRateLimiter {
+  private timestamps: number[] = [];
+  private queue = Promise.resolve();
+  send(action: () => Promise<void>) {
+    const task = this.queue.then(async () => {
+      for (;;) {
+        const now = Date.now();
+        this.timestamps = this.timestamps.filter(timestamp => now - timestamp < 5_000);
+        if (this.timestamps.length < 10) break;
+        const wait = 5_000 - (now - this.timestamps[0]) + 10;
+        await new Promise(resolve => setTimeout(resolve, wait));
+      }
+      this.timestamps.push(Date.now());
+      await action();
+    });
+    // A rejected send must not block subsequent queued messages forever.
+    this.queue = task.catch(() => undefined);
+    return task;
+  }
+}
 export class BanchoGateway {
   private client: any;
+  private readonly limiter = new BanchoRateLimiter();
   constructor(username: string, password: string, apiKey: string) {
     // bancho.js is CommonJS: its default export is a namespace object whose
     // BanchoClient property is the constructor.
@@ -32,17 +54,17 @@ export class BanchoGateway {
     const channel = await this.client.createLobby(name);
     // Tournament lobbies created by `!mp make` are password-protected by
     // default. Sending the command without an argument removes that password.
-    await channel.sendMessage(password ? `!mp password ${password}` : "!mp password");
-    return new BanchoRoom(channel);
+    await this.limiter.send(() => channel.sendMessage(password ? `!mp password ${password}` : "!mp password"));
+    return new BanchoRoom(channel, this.limiter);
   }
 }
 class BanchoRoom implements RoomActions {
-  constructor(private channel: any) {}
-  say(message: string) { return this.channel.sendMessage(message); }
-  command(command: string) { return this.channel.sendMessage(command); }
+  constructor(private channel: any, private limiter: BanchoRateLimiter) {}
+  say(message: string) { return this.limiter.send(() => this.channel.sendMessage(message)); }
+  command(command: string) { return this.limiter.send(() => this.channel.sendMessage(command)); }
   // Bancho's acknowledgement is not consistently emitted for client-created
   // tournament rooms, so send the command without waiting for that event.
-  setTitle(title: string) { return this.channel.sendMessage(`!mp name ${title}`); }
+  setTitle(title: string) { return this.limiter.send(() => this.channel.sendMessage(`!mp name ${title}`)); }
   players(): Participant[] { return (this.channel.lobby?.slots ?? []).filter((s: any) => s?.user).map((s: any) => ({ id: s.user.id, username: s.user.ircUsername })); }
   host() { const h = this.channel.lobby?.getHost?.(); return h?.user ? { id: h.user.id, username: h.user.ircUsername } : undefined; }
   beatmapId() { return this.channel.lobby?.beatmapId; }
