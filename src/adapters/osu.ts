@@ -29,6 +29,10 @@ export class OsuApi {
     const response = await fetch(`https://osu.ppy.sh/api/v2/users/${encodeURIComponent(username)}/osu`, { headers: { Authorization: `Bearer ${await this.accessToken()}` } });
     if (!response.ok) throw new Error("osu! user lookup failed"); return response.json() as Promise<any>;
   }
+  async userById(id: number) {
+    const response = await fetch(`https://osu.ppy.sh/api/v2/users/${id}`, { headers: { Authorization: `Bearer ${await this.accessToken()}` } });
+    if (!response.ok) throw new Error("osu! user lookup failed"); return response.json() as Promise<any>;
+  }
   async userBeatmapBestScore(beatmapId: number, userId: number) {
     const response = await fetch(`https://osu.ppy.sh/api/v2/beatmaps/${beatmapId}/scores/users/${userId}?legacy_only=1`, { headers: { Authorization: `Bearer ${await this.accessToken()}` } });
     if (response.status === 404) return undefined;

@@ -7,10 +7,40 @@
   grid-column: 1 / -1;
 }
 
+.activity-console {
+  grid-column: 1 / -1;
+}
+
 .regulations summary {
   color: var(--accent);
   cursor: pointer;
   margin-top: 4px;
+}
+
+.activity-console summary {
+  color: var(--accent);
+  cursor: pointer;
+  margin-top: 8px;
+}
+
+.activity-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 12px;
+}
+
+.activity-console pre {
+  max-height: 320px;
+  overflow: auto;
+  margin: 10px 0 0;
+  padding: 12px;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  background: #080d1a;
+  color: #c9d5f4;
+  font: 12px/1.45 ui-monospace, Consolas, monospace;
+  white-space: pre-wrap;
 }
 
 .regulations form {

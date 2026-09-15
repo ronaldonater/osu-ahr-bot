@@ -1,5 +1,5 @@
 import { PrismaClient } from "@prisma/client";
-import type { RoomActions } from "./adapters/bancho.js";
+import type { RoomActions, RoomActivity } from "./adapters/bancho.js";
 import { OsuApiRequestError, type OsuApi } from "./adapters/osu.js";
 import { DEFAULT_CONFIG, gameModeLabel, type GameMode, type LobbyConfig, type MapInfo, type Participant } from "./types.js";
 import { checkMap } from "./services/regulations.js";
@@ -10,28 +10,34 @@ import { VoteBook } from "./services/votes.js";
 const admins = new Set((process.env.ADMIN_OSU_IDS ?? "").split(",").filter(Boolean).map(Number));
 const fmt = (s: number) => `${Math.floor(s / 60)}m ${s % 60}s`;
 const fmtSession = (s: number) => `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ${s % 60}s`;
+export type LobbyActivity = RoomActivity;
 
 export class LobbyController {
   private config: LobbyConfig; private queue: number[] = []; private autoSkip = new Set<number>(); private votes = new VoteBook();
   private timer?: NodeJS.Timeout; private startedAt?: Date; private matchId?: number; private activeBeatmapId?: number; private matchGameMode?: GameMode; private selectedGameMode?: GameMode; private matchParticipants: Participant[] = []; private teamEvent = false; private eventActive = false; private lastValidMapId?: number; private lastAnnouncedMapId?: number; private passwordSetUntil = 0; private freeModSetUntil = 0;
   private turnTimer?: NodeJS.Timeout; private turnWarnings: NodeJS.Timeout[] = []; private turnHostId?: number; private turnMapId?: number; private turnStage?: "select" | "start"; private intendedHostId?: number;
+  private readonly activityLog: LobbyActivity[] = [];
   constructor(private db: PrismaClient, private lobbyId: number, private room: RoomActions, private osu: OsuApi, config: LobbyConfig = DEFAULT_CONFIG) { this.config = config; }
+  activity() { return this.activityLog.slice(-200); }
+  private logActivity(level: LobbyActivity["level"], message: string) { this.activityLog.push({ at: new Date().toISOString(), level, message }); if (this.activityLog.length > 200) this.activityLog.shift(); }
+  private runActivity(label: string, task: () => Promise<unknown>) { this.logActivity("info", label); void task().catch(error => this.logActivity("error", `${label} failed: ${error instanceof Error ? error.message : String(error)}`)); }
   async start() {
-    this.room.onMessage((p, t) => void this.handle(p, t));
-    this.room.onPlayerJoined(() => void this.joined());
-    this.room.onPlayerLeft(player => void this.departed(player));
-    this.room.onBeatmapChanged(id => void this.validateSelection(id));
-    this.room.onTitleChanged(title => void this.enforceTitle(title));
-    this.room.onPasswordChanged(() => void this.enforcePassword());
-    this.room.onFreeModChanged(enabled => void this.enforceFreeMod(enabled));
-    this.room.onHostChanged(host => void this.hostChanged(host));
-    this.room.onAllPlayersReady(() => void this.allPlayersReady());
-    this.room.onModsChanged(mods => void this.enforceDefaultMods(mods));
-    this.room.onMatchStarted(() => void this.beginMatch());
-    this.room.onMatchFinished(s => void this.finish(s));
+    this.room.onActivity(activity => this.logActivity(activity.level, activity.message));
+    this.room.onMessage((p, t) => this.runActivity(`Chat from ${p.username}`, () => this.handle(p, t)));
+    this.room.onPlayerJoined(player => this.runActivity(`Player joined: ${player.username}`, () => this.joined()));
+    this.room.onPlayerLeft(player => this.runActivity(`Player left: ${player.username}`, () => this.departed(player)));
+    this.room.onBeatmapChanged(id => this.runActivity(`Beatmap changed: ${id}`, () => this.validateSelection(id)));
+    this.room.onTitleChanged(title => this.runActivity(`Lobby title changed: ${title}`, () => this.enforceTitle(title)));
+    this.room.onPasswordChanged(() => this.runActivity("Lobby password changed", () => this.enforcePassword()));
+    this.room.onFreeModChanged(enabled => this.runActivity(`Free Mod changed: ${enabled ? "enabled" : "disabled"}`, () => this.enforceFreeMod(enabled)));
+    this.room.onHostChanged(host => this.runActivity(`Host changed: ${host?.username ?? "none"}`, () => this.hostChanged(host)));
+    this.room.onAllPlayersReady(() => this.runActivity("All players ready", () => this.allPlayersReady()));
+    this.room.onModsChanged(mods => this.runActivity(`Mods changed: ${mods.join(", ") || "none"}`, () => this.enforceDefaultMods(mods)));
+    this.room.onMatchStarted(() => this.runActivity("Match started", () => this.beginMatch()));
+    this.room.onMatchFinished(s => this.runActivity(`Match finished: ${s.length} result(s)`, () => this.finish(s)));
     this.reapplyFreeMod();
     await this.joined();
-    void this.hostChanged(this.room.host());
+    this.runActivity("Initial host check", () => this.hostChanged(this.room.host()));
     if (this.room.beatmapId()) await this.validateSelection(this.room.beatmapId()!);
   }
   private async joined() { await this.syncPlayers(); await this.electHost(); }
@@ -49,26 +55,46 @@ export class LobbyController {
     }
     if (wasQueued) await this.room.say(`${player.username} left and was removed from the queue.`);
     // Bancho clears host state asynchronously after a host leaves.
-    setTimeout(() => { void this.disableSoloAutoSkip(); void this.electHost(); }, 250);
+    setTimeout(() => this.runActivity("Post-leave host reconciliation", async () => { await this.disableSoloAutoSkip(); await this.electHost(); }), 250);
   }
   private async syncPlayers() {
     const players = this.room.players();
     for (const p of players) {
-      const saved = await this.db.player.upsert({ where: { id: p.id }, create: { id: p.id, username: p.username }, update: { username: p.username } });
+      const existing = await this.db.player.findUnique({ where: { id: p.id } });
+      // Bancho exposes IRC usernames (spaces become underscores). Resolve the
+      // profile ID once so local records retain the player's actual osu! name.
+      let username = existing?.username ?? p.username;
+      if (!existing || existing.username === p.username && p.username.includes("_")) {
+        try { const user = await this.osu.userById(p.id); if (typeof user.username === "string" && user.username) username = user.username; } catch { /* Keep the current local name if the profile lookup is temporarily unavailable. */ }
+      }
+      const saved = await this.db.player.upsert({ where: { id: p.id }, create: { id: p.id, username }, update: username === existing?.username ? {} : { username } });
       if (!saved.denied && !this.queue.includes(p.id)) this.queue.push(p.id);
       await this.db.lobbyPlayer.upsert({ where: { lobbyId_playerId: { lobbyId: this.lobbyId, playerId: p.id } }, create: { lobbyId: this.lobbyId, playerId: p.id }, update: {} });
     }
   }
   private isHost(p: Participant) { return this.room.host()?.id === p.id; }
-  private async electHost() {
+  private async electHost(attempt = 0) {
+    const activePlayerIds = new Set(this.room.players().map(player => player.id));
+    this.queue = this.queue.filter(id => activePlayerIds.has(id));
     if (this.room.host() || !this.queue[0]) return;
-    this.intendedHostId = this.queue[0];
-    await this.room.command(`!mp host #${this.queue[0]}`);
-    this.reapplyTitle(); this.reapplyPassword(); this.reapplyFreeMod();
-    await this.room.say(`Host assigned to the first queued player.`);
+    const next = this.queue[0]; this.intendedHostId = next;
+    try {
+      await this.room.command(`!mp host #${next}`);
+      this.reapplyTitle(); this.reapplyPassword(); this.reapplyFreeMod();
+      await this.room.say(`Host assigned to the first queued player.`);
+    } catch (error) {
+      this.intendedHostId = undefined;
+      if (attempt >= 3) throw error;
+      setTimeout(() => this.runActivity(`Host assignment retry ${attempt + 1}`, () => this.electHost(attempt + 1)), 750 * (attempt + 1));
+    }
   }
   private async hostChanged(host?: Participant) {
-    if (!host || this.matchId) return;
+    if (this.matchId) return;
+    if (!host) {
+      this.turnHostId = undefined; this.intendedHostId = undefined; this.clearTurnTimer();
+      setTimeout(() => this.runActivity("Host-cleared reconciliation", () => this.electHost()), 250);
+      return;
+    }
     const expectedHostId = this.queue[0];
     if (expectedHostId && host.id !== expectedHostId) {
       // Ignore Bancho's delayed event for the prior host while our own rotation is pending.
@@ -78,7 +104,7 @@ export class LobbyController {
       this.turnHostId = undefined; this.clearTurnTimer(); this.intendedHostId = expectedHostId;
       await this.room.say(`Host rotation is queue-controlled. Passing host to ${expectedHost.username}; use !skip to rotate turns.`);
       await this.room.command(`!mp host #${expectedHostId}`);
-      setTimeout(() => void this.hostChanged(this.room.host()), 500);
+      setTimeout(() => this.runActivity("Manual-host correction check", () => this.hostChanged(this.room.host())), 500);
       return;
     }
     this.intendedHostId = undefined;
@@ -91,7 +117,7 @@ export class LobbyController {
         this.startTurnTimer("select", host);
         return;
       }
-      void this.room.say(`${host.username}'s host turn was automatically skipped.`).then(() => this.skip());
+      this.runActivity("Auto-skip host turn", async () => { await this.room.say(`${host.username}'s host turn was automatically skipped.`); await this.skip(); });
       return;
     }
     this.startTurnTimer("select", host);
@@ -104,11 +130,11 @@ export class LobbyController {
   private startTurnTimer(stage: "select" | "start", host: Participant, mapId?: number) {
     this.clearTurnTimer(); this.turnHostId = host.id; this.turnMapId = mapId; this.turnStage = stage;
     const action = stage === "select" ? "select a map" : "start the match";
-    if (stage === "select") void this.room.say(`${host.username}, you have 5 minutes to select a map or host will be passed to the next player.`);
+    if (stage === "select") this.runActivity("Select-map timer started", () => this.room.say(`${host.username}, you have 5 minutes to select a map or host will be passed to the next player.`));
     for (const [delay, remaining] of [[180_000, "2 minutes"], [240_000, "1 minute"], [270_000, "30 seconds"], [290_000, "10 seconds"]] as const) {
-      this.turnWarnings.push(setTimeout(() => void this.room.say(`${host.username}: ${remaining} left to ${action}.`), delay));
+      this.turnWarnings.push(setTimeout(() => this.runActivity(`Turn warning: ${remaining}`, () => this.room.say(`${host.username}: ${remaining} left to ${action}.`)), delay));
     }
-    this.turnTimer = setTimeout(() => void this.turnExpired(stage, host, mapId), 300_000);
+    this.turnTimer = setTimeout(() => this.runActivity("Turn timer expired", () => this.turnExpired(stage, host, mapId)), 300_000);
   }
   private async turnExpired(stage: "select" | "start", host: Participant, mapId?: number) {
     if (this.room.host()?.id !== host.id || this.matchId) return;
@@ -135,7 +161,7 @@ export class LobbyController {
     if (cmd === "!cmds") return void this.room.say("Command list: https://ronaldonater.com/osu-ahr");
     if (cmd === "!bug") return void this.room.say("Report a bug: https://github.com/ronaldonater/osu-ahr-bot/issues");
     if (["!regulations"].includes(cmd)) return void this.showRegulations();
-    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.12");
+    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.13");
     if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p, value || undefined);
     if (["!timeleft", "!tl"].includes(cmd)) return void this.timeleft();
     if (["!ostats", "!os"].includes(cmd)) { const { username, mode } = this.usernameAndMode(args); return void this.stats(p, username, mode); }
@@ -212,8 +238,8 @@ export class LobbyController {
     const range = (min: number | undefined, max: number | undefined, suffix = "") => min !== undefined || max !== undefined ? `${min ?? "any"}–${max ?? "any"}${suffix}` : "any";
     return `Map regulations — Stars: ${stars} | Length: ${length} | BPM: ${range(r.minBpm, r.maxBpm)} | AR: ${range(r.minAr, r.maxAr)} | HP: ${range(r.minHp, r.maxHp)} | OD: ${range(r.minOd, r.maxOd)} | CS: ${range(r.minCs, r.maxCs)} | Year: ${range(r.minLastUpdatedYear, r.maxLastUpdatedYear)} | Mode: ${mode} | Status: ${statuses} | Converts: ${r.allowConvert ? "allowed" : "not allowed"} | Free mod: ${r.freeMod ? "enabled" : "disabled"}.`;
   }
-  private async skip() { if (this.queue.length) this.queue.push(this.queue.shift()!); const next = this.queue[0]; this.turnHostId = undefined; if (next) { this.intendedHostId = next; await this.room.command(`!mp host #${next}`); } this.reapplyTitle(); this.reapplyPassword(); this.reapplyFreeMod(); setTimeout(() => void this.hostChanged(this.room.host()), 500); await this.showQueue(); }
-  private async startMatch(seconds: number) { if (!Number.isFinite(seconds) || seconds < 0 || seconds > 120) return void this.room.say("Start delay must be between 0 and 120 seconds."); const mapId = this.room.beatmapId(); if (!mapId) return void this.room.say("Select a beatmap first."); const reason = checkMap(await this.osu.beatmap(mapId), this.config.regulations); if (reason) return void this.room.say(`Map rejected: ${reason}.`); this.clearTurnTimer(); this.stopTimer(); this.timer = setTimeout(() => void this.launch(mapId), seconds * 1000); await this.room.say(`Match starts in ${seconds}s.`); }
+  private async skip() { if (this.queue.length) this.queue.push(this.queue.shift()!); const next = this.queue[0]; this.turnHostId = undefined; if (next) { this.intendedHostId = next; await this.room.command(`!mp host #${next}`); } this.reapplyTitle(); this.reapplyPassword(); this.reapplyFreeMod(); setTimeout(() => this.runActivity("Host-rotation confirmation", () => this.hostChanged(this.room.host())), 500); await this.showQueue(); }
+  private async startMatch(seconds: number) { if (!Number.isFinite(seconds) || seconds < 0 || seconds > 120) return void this.room.say("Start delay must be between 0 and 120 seconds."); const mapId = this.room.beatmapId(); if (!mapId) return void this.room.say("Select a beatmap first."); const reason = checkMap(await this.osu.beatmap(mapId), this.config.regulations); if (reason) return void this.room.say(`Map rejected: ${reason}.`); this.clearTurnTimer(); this.stopTimer(); this.timer = setTimeout(() => this.runActivity("Match launch", () => this.launch(mapId)), seconds * 1000); await this.room.say(`Match starts in ${seconds}s.`); }
   private async validateSelection(mapId: number) {
     // Bancho emits an intermediate empty/invalid map ID while a host changes maps.
     // Wait for the subsequent real beatmap ID instead of showing an error to chat.
@@ -366,7 +392,7 @@ export class LobbyController {
     await this.db.match.update({ where: { id: this.matchId }, data: { endedAt: new Date() } });
     const mapId = this.activeBeatmapId; const startedAt = this.startedAt; const leaderboardParticipants = ordered.map(x => ({ ...x.player, matchScore: x.score }));
     this.matchId = undefined; this.activeBeatmapId = undefined; this.matchGameMode = undefined; this.startedAt = undefined; this.matchParticipants = [];
-    if (mapId && startedAt) setTimeout(() => void this.announceLeaderboardScores(mapId, startedAt, leaderboardParticipants), 10_000);
+    if (mapId && startedAt) setTimeout(() => this.runActivity("Leaderboard-score check", () => this.announceLeaderboardScores(mapId, startedAt, leaderboardParticipants)), 10_000);
     if (this.eventActive) { await this.room.command(`!mp set ${this.config.teamMode} ${this.config.scoreMode}`); this.teamEvent = false; this.eventActive = false; }
     await this.skip(); }
   private async announceLeaderboardScores(mapId: number, startedAt: Date, players: Array<Participant & { matchScore: number }>) {

@@ -38,6 +38,14 @@ async function main() {
   const app = express(); app.use(express.json()); app.use(express.static("public"));
   app.use((req, res, next) => req.header("authorization") === `Bearer ${env.DASHBOARD_TOKEN}` ? next() : res.status(401).json({ error: "dashboard token required" }));
   app.get("/health", (_req, res) => res.json({ ok: true, lobbies: controllers.size }));
+  app.post("/players", async (req, res, next) => { try {
+    const input = z.object({ username: z.string().min(1).max(64), mode: z.enum(["osu", "taiko", "fruits", "mania"]).default("osu") }).parse(req.body);
+    const user = await osu.user(input.username);
+    if (!Number.isInteger(user.id) || !user.username) return res.status(404).json({ error: "osu! user not found." });
+    const player = await db.player.upsert({ where: { id: user.id }, create: { id: user.id, username: user.username }, update: { username: user.username } });
+    const stats = await db.playerModeStats.upsert({ where: { playerId_mode: { playerId: player.id, mode: input.mode } }, create: { playerId: player.id, mode: input.mode }, update: {} });
+    return res.status(201).json({ id: player.id, username: player.username, mode: input.mode, elo: stats.elo, matches: stats.matches, wins: stats.wins, streak: stats.streak, longestStreak: stats.longestStreak });
+  } catch (e) { next(e); } });
   app.get("/players", async (req, res, next) => { try {
     const query = z.object({ username: z.string().min(1).max(64), mode: z.enum(["osu", "taiko", "fruits", "mania"]).default("osu") }).parse(req.query);
     const player = (await db.player.findMany({ where: { username: { contains: query.username } }, take: 10 })).find(candidate => candidate.username.toLowerCase() === query.username.toLowerCase());
@@ -71,6 +79,11 @@ async function main() {
     const lobbies = await db.lobby.findMany({ select: { id: true, banchoId: true, name: true, config: true, createdAt: true }, orderBy: { createdAt: "desc" } });
     res.json(lobbies.map(lobby => ({ ...lobby, active: controllers.has(lobby.id) })));
   });
+  app.get("/lobbies/:id/activity", (req, res, next) => { try {
+    const id = z.coerce.number().int().positive().parse(req.params.id); const controller = controllers.get(id);
+    if (!controller) return res.status(404).json({ error: "This lobby is not active in the current bot session." });
+    return res.json({ entries: controller.activity() });
+  } catch (e) { next(e); } });
   app.post("/lobbies", async (req, res, next) => { try {
     const body = z.object({ title: z.string().min(3).max(80), password: z.string().max(64).optional(), config: configSchema.optional() }).parse(req.body);
     res.status(201).json(await createLobby(body as { title: string; password?: string; config?: Partial<LobbyConfig> }));
