@@ -15,10 +15,8 @@ export interface RoomActions {
   onBeatmapChanged(listener: (beatmapId: number) => void): void;
   onTitleChanged(listener: (title: string) => void): void;
   onPasswordChanged(listener: () => void): void;
-  onFreeModChanged(listener: (enabled: boolean) => void): void;
   onHostChanged(listener: (host?: Participant) => void): void;
   onAllPlayersReady(listener: () => void): void;
-  onModsChanged(listener: (mods: string[]) => void): void;
   onMatchStarted(listener: () => void): void;
   onMatchFinished(listener: (scores: Array<{ player: Participant; score: number; team?: "red" | "blue" }>) => void): void;
   onActivity(listener: (activity: RoomActivity) => void): void;
@@ -93,10 +91,8 @@ class BanchoRoom implements RoomActions {
     });
   }
   onPasswordChanged(listener: () => void) { this.channel.lobby.on("passwordChanged", listener); this.channel.lobby.on("passwordRemoved", listener); }
-  onFreeModChanged(listener: (enabled: boolean) => void) { this.channel.lobby.on("freemod", listener); }
   onHostChanged(listener: (host?: Participant) => void) { this.channel.lobby.on("host", (player: any) => listener(player?.user ? this.participant(player.user, "Host change") : undefined)); }
   onAllPlayersReady(listener: () => void) { this.channel.lobby.on("allPlayersReady", listener); }
-  onModsChanged(listener: (mods: string[]) => void) { this.channel.lobby.on("mods", (mods: any) => listener((Array.isArray(mods) ? mods : []).filter(Boolean).map(mod => mod.shortMod).filter(Boolean))); }
   onMatchStarted(listener: () => void) { this.channel.lobby.on("matchStarted", listener); }
   onMatchFinished(listener: (scores: any[]) => void) { this.channel.lobby.on("matchFinished", (scores: any[]) => listener(scores.flatMap((score: any) => { const player = this.participant(score?.player?.user, "Match result"); return player ? [{ player, score: score.score, team: score.player.team }] : []; }))); }
   onActivity(listener: (activity: RoomActivity) => void) { this.activityListeners.add(listener); }

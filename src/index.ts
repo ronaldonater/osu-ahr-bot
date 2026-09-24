@@ -28,6 +28,7 @@ const configSchema = z.object({
 async function createLobby(input: { title: string; password?: string; config?: Partial<LobbyConfig> }) {
   const config: LobbyConfig = { ...DEFAULT_CONFIG, ...input.config, title: input.title, password: input.password, regulations: { ...DEFAULT_CONFIG.regulations, ...input.config?.regulations }, locks: { ...DEFAULT_CONFIG.locks, ...input.config?.locks } };
   const room = await bancho.makeLobby(input.title, input.password);
+  if (config.regulations.freeMod) await room.command("!mp mods 0 freemod");
   const banchoId = room.id();
   if (!banchoId) throw new Error("Could not identify newly-created multiplayer lobby");
   const lobby = await db.lobby.create({ data: { banchoId, name: input.title, password: input.password, config: config as any } });

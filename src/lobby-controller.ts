@@ -22,7 +22,7 @@ const RANDOM_EVENTS: RandomEvent[] = [
 
 export class LobbyController {
   private config: LobbyConfig; private queue: number[] = []; private autoSkip = new Set<number>(); private votes = new VoteBook();
-  private timer?: NodeJS.Timeout; private startedAt?: Date; private matchId?: number; private activeBeatmapId?: number; private matchGameMode?: GameMode; private selectedGameMode?: GameMode; private matchParticipants: Participant[] = []; private teamEvent = false; private eventActive = false; private lastValidMapId?: number; private lastAnnouncedMapId?: number; private passwordSetUntil = 0; private freeModSetUntil = 0;
+  private timer?: NodeJS.Timeout; private startedAt?: Date; private matchId?: number; private activeBeatmapId?: number; private matchGameMode?: GameMode; private selectedGameMode?: GameMode; private matchParticipants: Participant[] = []; private teamEvent = false; private eventActive = false; private lastValidMapId?: number; private lastAnnouncedMapId?: number; private passwordSetUntil = 0;
   private turnTimer?: NodeJS.Timeout; private turnWarnings: NodeJS.Timeout[] = []; private turnHostId?: number; private turnMapId?: number; private turnStage?: "select" | "start"; private intendedHostId?: number;
   private readonly activityLog: LobbyActivity[] = [];
   constructor(private db: PrismaClient, private lobbyId: number, private room: RoomActions, private osu: OsuApi, config: LobbyConfig = DEFAULT_CONFIG) { this.config = { ...DEFAULT_CONFIG, ...config, ranked: config.ranked !== false, regulations: { ...DEFAULT_CONFIG.regulations, ...config.regulations }, locks: { ...DEFAULT_CONFIG.locks, ...config.locks } }; }
@@ -37,13 +37,10 @@ export class LobbyController {
     this.room.onBeatmapChanged(id => this.runActivity(`Beatmap changed: ${id}`, () => this.validateSelection(id)));
     this.room.onTitleChanged(title => this.runActivity(`Lobby title changed: ${title}`, () => this.enforceTitle(title)));
     this.room.onPasswordChanged(() => this.runActivity("Lobby password changed", () => this.enforcePassword()));
-    this.room.onFreeModChanged(enabled => this.runActivity(`Free Mod changed: ${enabled ? "enabled" : "disabled"}`, () => this.enforceFreeMod(enabled)));
     this.room.onHostChanged(host => this.runActivity(`Host changed: ${host?.username ?? "none"}`, () => this.hostChanged(host)));
     this.room.onAllPlayersReady(() => this.runActivity("All players ready", () => this.allPlayersReady()));
-    this.room.onModsChanged(mods => this.runActivity(`Mods changed: ${mods.join(", ") || "none"}`, () => this.enforceDefaultMods(mods)));
     this.room.onMatchStarted(() => this.runActivity("Match started", () => this.beginMatch()));
     this.room.onMatchFinished(s => this.runActivity(`Match finished: ${s.length} result(s)`, () => this.finish(s)));
-    this.reapplyFreeMod();
     await this.joined();
     this.runActivity("Initial host check", () => this.hostChanged(this.room.host()));
     if (this.room.beatmapId()) await this.validateSelection(this.room.beatmapId()!);
@@ -88,7 +85,7 @@ export class LobbyController {
     const next = this.queue[0]; this.intendedHostId = next;
     try {
       await this.room.command(`!mp host #${next}`);
-      this.reapplyTitle(); this.reapplyPassword(); this.reapplyFreeMod();
+      this.reapplyTitle(); this.reapplyPassword();
       await this.room.say(`Host assigned to the first queued player.`);
     } catch (error) {
       this.intendedHostId = undefined;
@@ -170,7 +167,7 @@ export class LobbyController {
     if (cmd === "!cmds") return void this.room.say("Command list: https://ronaldonater.com/osu-ahr");
     if (cmd === "!bug") return void this.room.say("Report a bug: https://github.com/ronaldonater/osu-ahr-bot/issues");
     if (["!regulations"].includes(cmd)) return void this.showRegulations();
-    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.15");
+    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.16");
     if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p, value || undefined);
     if (["!timeleft", "!tl"].includes(cmd)) return void this.timeleft();
     if (["!ostats", "!os"].includes(cmd)) { const { username, mode } = this.usernameAndMode(args); return void this.stats(p, username, mode); }
@@ -248,7 +245,7 @@ export class LobbyController {
     const range = (min: number | undefined, max: number | undefined, suffix = "") => min !== undefined || max !== undefined ? `${min ?? "any"}–${max ?? "any"}${suffix}` : "any";
     return `Map regulations — Stars: ${stars} | Length: ${length} | BPM: ${range(r.minBpm, r.maxBpm)} | AR: ${range(r.minAr, r.maxAr)} | HP: ${range(r.minHp, r.maxHp)} | OD: ${range(r.minOd, r.maxOd)} | CS: ${range(r.minCs, r.maxCs)} | Year: ${range(r.minLastUpdatedYear, r.maxLastUpdatedYear)} | Mode: ${mode} | Status: ${statuses} | Converts: ${r.allowConvert ? "allowed" : "not allowed"} | Free mod: ${r.freeMod ? "enabled" : "disabled"}.`;
   }
-  private async skip() { if (this.queue.length) this.queue.push(this.queue.shift()!); const next = this.queue[0]; this.turnHostId = undefined; if (next) { this.intendedHostId = next; await this.room.command(`!mp host #${next}`); } this.reapplyTitle(); this.reapplyPassword(); this.reapplyFreeMod(); setTimeout(() => this.runActivity("Host-rotation confirmation", () => this.hostChanged(this.room.host())), 500); await this.showQueue(); }
+  private async skip() { if (this.queue.length) this.queue.push(this.queue.shift()!); const next = this.queue[0]; this.turnHostId = undefined; if (next) { this.intendedHostId = next; await this.room.command(`!mp host #${next}`); } this.reapplyTitle(); this.reapplyPassword(); setTimeout(() => this.runActivity("Host-rotation confirmation", () => this.hostChanged(this.room.host())), 500); await this.showQueue(); }
   private async startMatch(seconds: number) { if (!Number.isFinite(seconds) || seconds < 0 || seconds > 120) return void this.room.say("Start delay must be between 0 and 120 seconds."); const mapId = this.room.beatmapId(); if (!mapId) return void this.room.say("Select a beatmap first."); const reason = checkMap(await this.osu.beatmap(mapId), this.config.regulations); if (reason) return void this.room.say(`Map rejected: ${reason}.`); this.clearTurnTimer(); this.stopTimer(); this.timer = setTimeout(() => this.runActivity("Match launch", () => this.launch(mapId)), seconds * 1000); await this.room.say(`Match starts in ${seconds}s.`); }
   private async validateSelection(mapId: number) {
     // Bancho emits an intermediate empty/invalid map ID while a host changes maps.
@@ -280,10 +277,6 @@ export class LobbyController {
     this.passwordSetUntil = Date.now() + 3_000;
     void this.room.command(`!mp password ${this.config.password}`).catch(() => undefined);
   }
-  private reapplyFreeMod() {
-    this.freeModSetUntil = Date.now() + 3_000;
-    void this.room.command(this.config.regulations.freeMod ? "!mp mods 0 freemod" : "!mp mods 0").catch(() => undefined);
-  }
   private async enforceTitle(title: string) {
     if (!this.config.locks.title || title === this.config.title) return;
     this.reapplyTitle();
@@ -294,29 +287,19 @@ export class LobbyController {
     this.reapplyPassword();
     await this.room.say("Lobby password is locked and has been restored.");
   }
-  private async enforceFreeMod(enabled: boolean) {
-    if (Date.now() < this.freeModSetUntil || enabled === this.config.regulations.freeMod) return;
-    this.reapplyFreeMod();
-    await this.room.say(`Free mod is regulated and has been restored to ${this.config.regulations.freeMod ? "enabled" : "disabled"}.`);
-  }
-  private async enforceDefaultMods(mods: string[]) {
-    const blocked = mods.filter(mod => ["DT", "NC", "HT"].includes(mod.toUpperCase()));
-    if (!blocked.length) return;
-    this.reapplyFreeMod();
-    await this.room.say(`${blocked.join("/")} is not allowed as a lobby modifier. Restored permitted mods.`);
-  }
+  private async setLobbyMode(teamMode: number, scoreMode: number) { await this.room.command(`!mp set ${teamMode} ${scoreMode}`); }
   private async prepareRoundEvent() {
     // Decide and configure the next round as soon as host rotates. This gives
     // Bancho the full map-pick turn to apply the mode/team commands before start.
     this.eventActive = Math.random() < this.config.eventChance;
     this.teamEvent = false;
     if (!this.eventActive) {
-      await this.room.command(`!mp set ${this.config.teamMode} ${this.config.scoreMode}`);
+      await this.setLobbyMode(this.config.teamMode, this.config.scoreMode);
       return;
     }
     const event = RANDOM_EVENTS[Math.floor(Math.random() * RANDOM_EVENTS.length)];
     this.teamEvent = event.teamMode === 2;
-    await this.room.command(`!mp set ${event.teamMode} ${event.scoreMode}`);
+    await this.setLobbyMode(event.teamMode, event.scoreMode);
     if (!this.teamEvent) return void this.room.say(`Random event: ${event.label} (unranked).`);
     const ids = this.room.players().map(player => player.id);
     const players = await this.db.player.findMany({ where: { id: { in: ids } } });
@@ -339,9 +322,6 @@ export class LobbyController {
     this.matchParticipants = this.room.players();
     this.matchGameMode = gameMode ?? this.selectedGameMode ?? this.config.regulations.gameMode ?? "osu";
     this.matchId = (await this.db.match.create({ data: { lobbyId: this.lobbyId, beatmapId: mapId, gameMode: this.matchGameMode, teamEvent: this.teamEvent, startedAt: new Date() } })).id;
-    // Reapplying Free Mod with `!mp mods 0 freemod` clears every player's
-    // individual selections. It is already enforced when the setting changes,
-    // so never send that command as a match is beginning.
     this.activeBeatmapId = mapId; this.startedAt = new Date(); this.votes.clear(); this.reapplyTitle(); this.reapplyPassword();
   }
   private stopTimer() { if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
@@ -404,7 +384,7 @@ export class LobbyController {
     const mapId = this.activeBeatmapId; const startedAt = this.startedAt; const leaderboardParticipants = ordered.map(x => ({ ...x.player, matchScore: x.score }));
     this.matchId = undefined; this.activeBeatmapId = undefined; this.matchGameMode = undefined; this.startedAt = undefined; this.matchParticipants = [];
     if (mapId && startedAt) setTimeout(() => this.runActivity("Leaderboard-score check", () => this.announceLeaderboardScores(mapId, startedAt, leaderboardParticipants)), 10_000);
-    if (this.eventActive) { await this.room.command(`!mp set ${this.config.teamMode} ${this.config.scoreMode}`); this.teamEvent = false; this.eventActive = false; }
+    if (this.eventActive) { this.eventActive = false; await this.setLobbyMode(this.config.teamMode, this.config.scoreMode); this.teamEvent = false; }
     await this.skip(); }
   private async announceLeaderboardScores(mapId: number, startedAt: Date, players: Array<Participant & { matchScore: number }>) {
     // Newly-submitted scores can take longer than a few seconds to appear in
@@ -561,13 +541,20 @@ export class LobbyController {
       this.passwordSetUntil = Date.now() + 3_000;
       await this.room.command(this.config.password ? `!mp password ${this.config.password}` : "!mp password");
     }
-    this.reapplyFreeMod();
     await this.db.lobby.update({ where: { id: this.lobbyId }, data: { name: this.config.title, password: this.config.password, config: this.config as any } });
     await this.room.say(`Lobby settings updated from the dashboard. ${this.regulationSummary()} Random events: ${(this.config.eventChance * 100).toFixed(0)}%. Ranking: ${this.config.ranked ? "enabled" : "disabled"}.`);
   }
   private async updateMap() { const id = this.room.beatmapId(); if (!id) return void this.room.say("Select a beatmap first."); const map = await this.osu.beatmap(id); await this.room.command(`!mp map ${map.id}`); await this.room.say(`Map refreshed: ${map.version}.`); }
-  private async keep(a: string[]) { const [kind, ...rest] = a; let confirmation = ""; if (kind === "size") { const size = Number(rest[0]); if (!Number.isInteger(size) || size < 1 || size > 16) return void this.room.say("Lobby size must be 1-16."); this.config.size = size; this.config.locks.size = true; await this.room.command(`!mp size ${this.config.size}`); confirmation = `Lobby size locked to ${size}.`; } if (kind === "password") { if (!this.config.password) return void this.room.say("This lobby was created passwordless, so password locking is not allowed."); const password = rest.join(" "); if (!password) return void this.room.say("Usage: *keep password [password]."); this.config.password = password; this.config.locks.password = true; this.passwordSetUntil = Date.now() + 3_000; await this.room.command(`!mp password ${this.config.password}`); confirmation = "Lobby password lock enabled."; } if (kind === "mode") { this.config.teamMode = Number(rest[0]) as 0; this.config.scoreMode = Number(rest[1]) as 0; this.config.locks.mode = true; await this.room.command(`!mp set ${this.config.teamMode} ${this.config.scoreMode}`); confirmation = "Lobby mode lock enabled."; } if (kind === "mods") { this.config.mods = rest; this.config.locks.mods = true; await this.room.command(`!mp mods ${rest.join(" ")}`); confirmation = `Mod lock enabled: ${rest.join(" ") || "None"}.`; } if (kind === "title") { const title = rest.join(" "); if (!title) return void this.room.say("Usage: *keep title [title]."); this.config.title = title; this.config.locks.title = true; await this.room.setTitle(this.config.title); confirmation = `Lobby title locked to: ${this.config.title}.`; } await this.persist(); if (confirmation) await this.room.say(confirmation); }
-  private async noKeep(kind?: string) { if (kind === "mod") kind = "mods"; if (!kind || !["size", "password", "mode", "mods", "title"].includes(kind)) return void this.room.say("Unknown lobby lock. Use size, password, mode, mod, or title."); const wasLocked = Boolean(this.config.locks[kind as keyof LobbyConfig["locks"]]); delete this.config.locks[kind as keyof LobbyConfig["locks"]]; await this.persist(); await this.room.say(wasLocked ? `${kind === "mods" ? "Mod" : kind[0].toUpperCase() + kind.slice(1)} lock removed.` : `${kind === "mods" ? "Mod" : kind[0].toUpperCase() + kind.slice(1)} lock was not enabled.`); }
+  private async keep(a: string[]) {
+    const [kind, ...rest] = a; let confirmation = "";
+    if (kind === "size") { const size = Number(rest[0]); if (!Number.isInteger(size) || size < 1 || size > 16) return void this.room.say("Lobby size must be 1-16."); this.config.size = size; this.config.locks.size = true; await this.room.command(`!mp size ${size}`); confirmation = `Lobby size locked to ${size}.`; }
+    if (kind === "password") { if (!this.config.password) return void this.room.say("This lobby was created passwordless, so password locking is not allowed."); const password = rest.join(" "); if (!password) return void this.room.say("Usage: *keep password [password]."); this.config.password = password; this.config.locks.password = true; this.passwordSetUntil = Date.now() + 3_000; await this.room.command(`!mp password ${password}`); confirmation = "Lobby password lock enabled."; }
+    if (kind === "mods") { this.config.mods = rest; this.config.locks.mods = true; await this.room.command(`!mp mods ${rest.join(" ")}`); confirmation = `Mod lock enabled: ${rest.join(" ") || "None"}.`; }
+    if (kind === "title") { const title = rest.join(" "); if (!title) return void this.room.say("Usage: *keep title [title]."); this.config.title = title; this.config.locks.title = true; await this.room.setTitle(title); confirmation = `Lobby title locked to: ${title}.`; }
+    if (!confirmation) return void this.room.say("Unknown lobby lock. Use size, password, mods, or title.");
+    await this.persist(); await this.room.say(confirmation);
+  }
+  private async noKeep(kind?: string) { if (kind === "mod") kind = "mods"; if (!kind || !["size", "password", "mods", "title"].includes(kind)) return void this.room.say("Unknown lobby lock. Use size, password, mods, or title."); const wasLocked = Boolean(this.config.locks[kind as keyof LobbyConfig["locks"]]); delete this.config.locks[kind as keyof LobbyConfig["locks"]]; await this.persist(); await this.room.say(wasLocked ? `${kind === "mods" ? "Mod" : kind[0].toUpperCase() + kind.slice(1)} lock removed.` : `${kind === "mods" ? "Mod" : kind[0].toUpperCase() + kind.slice(1)} lock was not enabled.`); }
   private async regulation(a: string[]) {
     if (a[0] === "enable") this.config.regulations.enabled = true;
     else if (a[0] === "disable") this.config.regulations.enabled = false;
@@ -590,7 +577,7 @@ export class LobbyController {
         }
       }
     }
-    this.reapplyFreeMod(); await this.persist(); await this.room.say(`Regulations updated. ${this.regulationSummary()}`);
+    await this.persist(); await this.room.say(`Regulations updated. ${this.regulationSummary()}`);
   }
   private async denylist(a: string[]) { const username = a.slice(1).join(" "); if (!["add", "remove"].includes(a[0]) || !username) return void this.room.say("Usage: *denylist add [username] or *denylist remove [username]."); const p = await this.db.player.findFirst({ where: { username: { equals: username } } }); if (!p) return void this.room.say(`${username} is not in this bot's player database yet.`); const denied = a[0] === "add"; await this.db.player.update({ where: { id: p.id }, data: { denied } }); await this.room.say(`${p.username} ${denied ? "added to" : "removed from"} the denylist.`); }
   private persist() { return this.db.lobby.update({ where: { id: this.lobbyId }, data: { config: this.config as any } }); }

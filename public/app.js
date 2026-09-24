@@ -14,7 +14,7 @@ function regulationsPayload(form) {
   return regulations;
 }
 function payload(form) {
-  const data = new FormData(form); const result = { title: data.get('title').trim(), config: { regulations: regulationsPayload(form), eventChance: number(data.get('eventChance')) / 100, ranked: data.has('ranked') } };
+  const data = new FormData(form); const result = { title: data.get('title').trim(), config: { regulations: regulationsPayload(form), eventChance: number(data.get('eventChance')) / 100, ranked: data.has('ranked'), teamMode: number(data.get('teamMode')), scoreMode: number(data.get('scoreMode')) } };
   if (data.get('password')) result.password = data.get('password'); return result;
 }
 async function request(url, options = {}) { const res = await fetch(url, { ...options, headers: headers() }); if (!res.ok) { const body = await res.json().catch(() => ({})); throw new Error(body.error || `Request failed (${res.status})`); } return res.status === 204 ? undefined : res.json(); }
