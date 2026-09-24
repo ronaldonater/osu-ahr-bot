@@ -12,6 +12,7 @@ const db = new PrismaClient(); const osu = new OsuApi(env.OSU_CLIENT_ID, env.OSU
 const controllers = new Map<number, LobbyController>();
 const configSchema = z.object({
   eventChance: z.number().min(0).max(1).optional(),
+  ranked: z.boolean().optional(),
   teamMode: z.number().int().min(0).max(3).optional(), scoreMode: z.number().int().min(0).max(3).optional(),
   regulations: z.object({
     enabled: z.boolean().optional(), minStar: z.number().min(0).optional(), maxStar: z.number().min(0).optional(),
@@ -91,7 +92,7 @@ async function main() {
   app.patch("/lobbies/:id/regulations", async (req, res, next) => { try {
     const id = z.coerce.number().int().positive().parse(req.params.id); const controller = controllers.get(id);
     if (!controller) return res.status(404).json({ error: "This lobby is not active in the current bot session." });
-    const body = z.object({ regulations: configSchema.shape.regulations.unwrap(), eventChance: z.number().min(0).max(1).optional(), title: z.string().min(3).max(80).optional(), password: z.string().min(1).max(64).optional(), removePassword: z.boolean().optional() }).parse(req.body);
+    const body = z.object({ regulations: configSchema.shape.regulations.unwrap(), eventChance: z.number().min(0).max(1).optional(), ranked: z.boolean().optional(), title: z.string().min(3).max(80).optional(), password: z.string().min(1).max(64).optional(), removePassword: z.boolean().optional() }).parse(req.body);
     await controller.updateRegulations(body.regulations ?? {}, body.eventChance, body);
     return res.json({ ok: true });
   } catch (e) { next(e); } });

@@ -11,13 +11,21 @@ const admins = new Set((process.env.ADMIN_OSU_IDS ?? "").split(",").filter(Boole
 const fmt = (s: number) => `${Math.floor(s / 60)}m ${s % 60}s`;
 const fmtSession = (s: number) => `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ${s % 60}s`;
 export type LobbyActivity = RoomActivity;
+type RandomEvent = { teamMode: 0 | 2; scoreMode: 0 | 1 | 2; label: string };
+const RANDOM_EVENTS: RandomEvent[] = [
+  { teamMode: 2, scoreMode: 0, label: "Team VS — Score" },
+  { teamMode: 2, scoreMode: 2, label: "Team VS — Combo" },
+  { teamMode: 2, scoreMode: 1, label: "Team VS — Accuracy" },
+  { teamMode: 0, scoreMode: 2, label: "Head-to-Head — Combo" },
+  { teamMode: 0, scoreMode: 1, label: "Head-to-Head — Accuracy" }
+];
 
 export class LobbyController {
   private config: LobbyConfig; private queue: number[] = []; private autoSkip = new Set<number>(); private votes = new VoteBook();
   private timer?: NodeJS.Timeout; private startedAt?: Date; private matchId?: number; private activeBeatmapId?: number; private matchGameMode?: GameMode; private selectedGameMode?: GameMode; private matchParticipants: Participant[] = []; private teamEvent = false; private eventActive = false; private lastValidMapId?: number; private lastAnnouncedMapId?: number; private passwordSetUntil = 0; private freeModSetUntil = 0;
   private turnTimer?: NodeJS.Timeout; private turnWarnings: NodeJS.Timeout[] = []; private turnHostId?: number; private turnMapId?: number; private turnStage?: "select" | "start"; private intendedHostId?: number;
   private readonly activityLog: LobbyActivity[] = [];
-  constructor(private db: PrismaClient, private lobbyId: number, private room: RoomActions, private osu: OsuApi, config: LobbyConfig = DEFAULT_CONFIG) { this.config = config; }
+  constructor(private db: PrismaClient, private lobbyId: number, private room: RoomActions, private osu: OsuApi, config: LobbyConfig = DEFAULT_CONFIG) { this.config = { ...DEFAULT_CONFIG, ...config, ranked: config.ranked !== false, regulations: { ...DEFAULT_CONFIG.regulations, ...config.regulations }, locks: { ...DEFAULT_CONFIG.locks, ...config.locks } }; }
   activity() { return this.activityLog.slice(-200); }
   private logActivity(level: LobbyActivity["level"], message: string) { this.activityLog.push({ at: new Date().toISOString(), level, message }); if (this.activityLog.length > 200) this.activityLog.shift(); }
   private runActivity(label: string, task: () => Promise<unknown>) { this.logActivity("info", label); void task().catch(error => this.logActivity("error", `${label} failed: ${error instanceof Error ? error.message : String(error)}`)); }
@@ -120,6 +128,7 @@ export class LobbyController {
       this.runActivity("Auto-skip host turn", async () => { await this.room.say(`${host.username}'s host turn was automatically skipped.`); await this.skip(); });
       return;
     }
+    await this.prepareRoundEvent();
     this.startTurnTimer("select", host);
   }
   private clearTurnTimer() {
@@ -161,7 +170,7 @@ export class LobbyController {
     if (cmd === "!cmds") return void this.room.say("Command list: https://ronaldonater.com/osu-ahr");
     if (cmd === "!bug") return void this.room.say("Report a bug: https://github.com/ronaldonater/osu-ahr-bot/issues");
     if (["!regulations"].includes(cmd)) return void this.showRegulations();
-    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.13");
+    if (["!version", "!v"].includes(cmd)) return void this.room.say("osu-ahr-bot v0.1.15");
     if (["!playtime", "!pt"].includes(cmd)) return void this.playtime(p, value || undefined);
     if (["!timeleft", "!tl"].includes(cmd)) return void this.timeleft();
     if (["!ostats", "!os"].includes(cmd)) { const { username, mode } = this.usernameAndMode(args); return void this.stats(p, username, mode); }
@@ -184,6 +193,7 @@ export class LobbyController {
     if (cmd === "*resetelo") return void this.resetElo(args[0]);
     if (cmd === "*close") return void this.closeLobby();
     if (cmd === "*eventchance") return void this.setEventChance(args[0]);
+    if (cmd === "*ranked") return void this.setRanked(args[0]);
     if (cmd === "*kick") return void this.kick(value);
     if (cmd === "*keep") return void this.keep(args);
     if (cmd === "*no" && args[0] === "keep") return void this.noKeep(args[1]);
@@ -295,31 +305,31 @@ export class LobbyController {
     this.reapplyFreeMod();
     await this.room.say(`${blocked.join("/")} is not allowed as a lobby modifier. Restored permitted mods.`);
   }
-  private async launch(mapId: number) {
-    const gameMode = (await this.osu.beatmap(mapId)).mode;
+  private async prepareRoundEvent() {
+    // Decide and configure the next round as soon as host rotates. This gives
+    // Bancho the full map-pick turn to apply the mode/team commands before start.
     this.eventActive = Math.random() < this.config.eventChance;
     this.teamEvent = false;
-    if (this.eventActive) {
-      const events: Array<{ teamMode: 0 | 2; scoreMode: 0 | 1 | 2; label: string }> = [
-        { teamMode: 2, scoreMode: 0, label: "Team VS — Score" },
-        { teamMode: 2, scoreMode: 2, label: "Team VS — Combo" },
-        { teamMode: 2, scoreMode: 1, label: "Team VS — Accuracy" },
-        { teamMode: 0, scoreMode: 2, label: "Head-to-Head — Combo" },
-        { teamMode: 0, scoreMode: 1, label: "Head-to-Head — Accuracy" }
-      ];
-      const event = events[Math.floor(Math.random() * events.length)]; this.teamEvent = event.teamMode === 2;
-      await this.room.command(`!mp set ${event.teamMode} ${event.scoreMode}`);
-      if (this.teamEvent) {
-        const ids = this.room.players().map(p => p.id);
-        const players = await this.db.player.findMany({ where: { id: { in: ids } } });
-        const modeStats = await this.db.playerModeStats.findMany({ where: { playerId: { in: ids }, mode: gameMode } });
-        const eloByPlayer = new Map(modeStats.map(stat => [stat.playerId, stat.elo]));
-        const teams = balancedTeams(players.map(player => ({ ...player, elo: eloByPlayer.get(player.id) ?? 1000 })));
-        for (const player of teams.red) await this.room.command(`!mp team ${player.username} Red`);
-        for (const player of teams.blue) await this.room.command(`!mp team ${player.username} Blue`);
-        await this.room.say(`Random event: ${event.label} (unranked). Balanced teams assigned based on ELO.`);
-      } else await this.room.say(`Random event: ${event.label} (unranked).`);
+    if (!this.eventActive) {
+      await this.room.command(`!mp set ${this.config.teamMode} ${this.config.scoreMode}`);
+      return;
     }
+    const event = RANDOM_EVENTS[Math.floor(Math.random() * RANDOM_EVENTS.length)];
+    this.teamEvent = event.teamMode === 2;
+    await this.room.command(`!mp set ${event.teamMode} ${event.scoreMode}`);
+    if (!this.teamEvent) return void this.room.say(`Random event: ${event.label} (unranked).`);
+    const ids = this.room.players().map(player => player.id);
+    const players = await this.db.player.findMany({ where: { id: { in: ids } } });
+    const mode = this.currentStatsMode();
+    const modeStats = await this.db.playerModeStats.findMany({ where: { playerId: { in: ids }, mode } });
+    const eloByPlayer = new Map(modeStats.map(stat => [stat.playerId, stat.elo]));
+    const teams = balancedTeams(players.map(player => ({ ...player, elo: eloByPlayer.get(player.id) ?? 1000 })));
+    for (const player of teams.red) await this.room.command(`!mp team ${player.username} Red`);
+    for (const player of teams.blue) await this.room.command(`!mp team ${player.username} Blue`);
+    await this.room.say(`Random event: ${event.label} (unranked). Balanced teams assigned based on ELO.`);
+  }
+  private async launch(mapId: number) {
+    const gameMode = (await this.osu.beatmap(mapId)).mode;
     await this.beginMatch(mapId, gameMode); await this.room.command("!mp start"); }
   /** Covers bot-started games and games started directly by the current host. */
   private async beginMatch(mapId = this.room.beatmapId(), gameMode?: GameMode) {
@@ -370,7 +380,7 @@ export class LobbyController {
       const stats = statsByPlayer.get(player.id);
       return [{ playerId: player.id, currentElo: stats?.elo ?? 1000, matchCount: stats?.matches ?? 0, score: score === undefined || score === null || score === -1 ? null : score }];
     });
-    const ranked = !this.eventActive && ratingInputs.length > 1 ? fractionalElo(ratingInputs) : [];
+    const ranked = this.config.ranked && !this.eventActive && ratingInputs.length > 1 ? fractionalElo(ratingInputs) : [];
     const ratingByPlayer = new Map(ranked.map(result => [result.playerId, result]));
     const highestCompletedScore = Math.max(...ratingInputs.map(result => result.score ?? -1));
     for (const player of participants) {
@@ -387,7 +397,8 @@ export class LobbyController {
         const rating = ratingByPlayer.get(player.id);
         return rating ? [`${player.username} ${rating.eloChange >= 0 ? "+" : ""}${rating.eloChange} (${rating.newElo})`] : [];
       }));
-    } else if (this.eventActive) await this.room.say("This random event was unranked; no ELO changes were applied.");
+    } else if (!this.config.ranked) await this.room.say("This lobby is unranked; no ELO changes or competitive stats were applied.");
+    else if (this.eventActive) await this.room.say("This random event was unranked; no ELO changes were applied.");
     else if (ratingInputs.length === 1) await this.room.say("No ELO changes were applied: at least two players are required for a ranked match.");
     await this.db.match.update({ where: { id: this.matchId }, data: { endedAt: new Date() } });
     const mapId = this.activeBeatmapId; const startedAt = this.startedAt; const leaderboardParticipants = ordered.map(x => ({ ...x.player, matchScore: x.score }));
@@ -529,10 +540,18 @@ export class LobbyController {
     await this.persist();
     await this.room.say(`Random event chance set to ${percent}%.`);
   }
+  private async setRanked(value?: string) {
+    const enabled = value?.toLowerCase();
+    if (enabled !== "on" && enabled !== "off") return void this.room.say("Usage: *ranked [on/off].");
+    this.config.ranked = enabled === "on";
+    await this.persist();
+    await this.room.say(`Lobby ranking is now ${this.config.ranked ? "enabled — matches count toward ELO and stats." : "disabled — matches are unranked and do not count toward ELO or stats."}`);
+  }
   async close() { await this.closeLobby(); }
-  async updateRegulations(regulations: Partial<LobbyConfig["regulations"]>, eventChance?: number, details?: { title?: string; password?: string; removePassword?: boolean }) {
+  async updateRegulations(regulations: Partial<LobbyConfig["regulations"]>, eventChance?: number, details?: { title?: string; password?: string; removePassword?: boolean; ranked?: boolean }) {
     this.config.regulations = { ...DEFAULT_CONFIG.regulations, ...regulations };
     if (eventChance !== undefined) this.config.eventChance = eventChance;
+    if (details?.ranked !== undefined) this.config.ranked = details.ranked;
     if (details?.title && details.title !== this.config.title) {
       this.config.title = details.title;
       await this.room.setTitle(details.title);
@@ -544,7 +563,7 @@ export class LobbyController {
     }
     this.reapplyFreeMod();
     await this.db.lobby.update({ where: { id: this.lobbyId }, data: { name: this.config.title, password: this.config.password, config: this.config as any } });
-    await this.room.say(`Lobby settings updated from the dashboard. ${this.regulationSummary()} Random events: ${(this.config.eventChance * 100).toFixed(0)}%.`);
+    await this.room.say(`Lobby settings updated from the dashboard. ${this.regulationSummary()} Random events: ${(this.config.eventChance * 100).toFixed(0)}%. Ranking: ${this.config.ranked ? "enabled" : "disabled"}.`);
   }
   private async updateMap() { const id = this.room.beatmapId(); if (!id) return void this.room.say("Select a beatmap first."); const map = await this.osu.beatmap(id); await this.room.command(`!mp map ${map.id}`); await this.room.say(`Map refreshed: ${map.version}.`); }
   private async keep(a: string[]) { const [kind, ...rest] = a; let confirmation = ""; if (kind === "size") { const size = Number(rest[0]); if (!Number.isInteger(size) || size < 1 || size > 16) return void this.room.say("Lobby size must be 1-16."); this.config.size = size; this.config.locks.size = true; await this.room.command(`!mp size ${this.config.size}`); confirmation = `Lobby size locked to ${size}.`; } if (kind === "password") { if (!this.config.password) return void this.room.say("This lobby was created passwordless, so password locking is not allowed."); const password = rest.join(" "); if (!password) return void this.room.say("Usage: *keep password [password]."); this.config.password = password; this.config.locks.password = true; this.passwordSetUntil = Date.now() + 3_000; await this.room.command(`!mp password ${this.config.password}`); confirmation = "Lobby password lock enabled."; } if (kind === "mode") { this.config.teamMode = Number(rest[0]) as 0; this.config.scoreMode = Number(rest[1]) as 0; this.config.locks.mode = true; await this.room.command(`!mp set ${this.config.teamMode} ${this.config.scoreMode}`); confirmation = "Lobby mode lock enabled."; } if (kind === "mods") { this.config.mods = rest; this.config.locks.mods = true; await this.room.command(`!mp mods ${rest.join(" ")}`); confirmation = `Mod lock enabled: ${rest.join(" ") || "None"}.`; } if (kind === "title") { const title = rest.join(" "); if (!title) return void this.room.say("Usage: *keep title [title]."); this.config.title = title; this.config.locks.title = true; await this.room.setTitle(this.config.title); confirmation = `Lobby title locked to: ${this.config.title}.`; } await this.persist(); if (confirmation) await this.room.say(confirmation); }
